@@ -111,6 +111,7 @@ h1, h2, h3, h4 { line-height: 1.35; }
 .demo-bar-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 8px; }
 .demo-bar-label { font-weight: 500; }
 .demo-select {
+  min-width: 5.5em;          /* 身分選單只有兩三個字：給箭頭留位置，免得字被蓋掉 */
   max-width: 11.5em;
   padding: 3px 6px;
   border: 1px solid var(--line-2);
