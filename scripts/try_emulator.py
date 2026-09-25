@@ -129,7 +129,9 @@ def find_java():
     import test_rules as tr
     seen = []
     for path, _ in hostos.find_exe_all("java"):
-        if hostos.OS == "mac" and os.path.realpath(path) == "/usr/bin/java" and not _mac_has_jdk():
+        # 比對原字串或 realpath 皆可：在非 Mac 上跑測試時 realpath 會把路徑改成當地格式
+        is_stub = path == "/usr/bin/java" or os.path.realpath(path) == "/usr/bin/java"
+        if hostos.OS == "mac" and is_stub and not _mac_has_jdk():
             seen.append("%s（Mac 內建的空殼，還沒裝 JDK）" % path)
             continue
         major = tr.java_major(path)
