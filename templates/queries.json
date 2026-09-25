@@ -1,0 +1,238 @@
+{
+  "_comment": "查詢形狀登記表（正本）。格式與推導規則見 docs/DATA-MODEL.md §4。前端只准用這裡登記過的查詢名（Store.query／watch／count 的第一個參數）；新增或修改查詢＝改這份，再跑 python3 scripts/build_indexes.py，它會重新產生 firestore.indexes.json 與 site/js/core/queries.js，並更新不了就 exit 1。兩個產生檔都進 git，不准手改。",
+  "version": 1,
+  "roles": {
+    "teacher": "導師（規則裡 isTeacher()）",
+    "reader": "班網讀者（isReader()）",
+    "privateReader": "私密讀者（isPrivateReader()）",
+    "seatReader": "座號家長或同仁逐座號閱讀（isSeatReaderOf(seat)）",
+    "seatParent": "座號家長（isParentOf(seat)）",
+    "functions": "v1.1 選配 Cloud Functions（管理身分，不受規則管，但一樣要索引）"
+  },
+  "collections": {
+    "posts":             {"memberFilter": ["visible", "==", true]},
+    "comments":          {"memberFilter": ["status", "==", "visible"]},
+    "reads":             {"teacherOnly": true},
+    "albums":            {"memberFilter": ["visible", "==", true]},
+    "thumbs":            {"gatedByParent": true},
+    "private_posts":     {"memberFilter": ["visible", "==", true]},
+    "pages":             {"memberFilter": ["visible", "==", true]},
+    "student_blogs":     {"teacherOnly": true},
+    "entries":           {"memberFilter": ["visible", "==", true]},
+    "blog_comments":     {"memberFilter": ["status", "==", "visible"]},
+    "allowlist":         {"teacherOnly": true},
+    "private_allowlist": {"teacherOnly": true},
+    "parent_child_map":  {"teacherOnly": true},
+    "seating":           {"teacherOnly": true},
+    "personal_photos":   {"teacherOnly": true},
+    "parent_photo_display": {"teacherOnly": true},
+    "blog_notify_queue": {"teacherOnly": true}
+  },
+  "queries": {
+    "posts.recent": {
+      "use": "首頁最新 3 篇（limit 3）、紀事列表（往下捲 startAfter）、單篇頁的「上一篇」（startAfter 目前這篇、limit 1）",
+      "who": ["reader"], "path": "posts",
+      "where": [["visible", "==", true]], "orderBy": [["date", "desc"]],
+      "limit": 20, "cursor": "startAfter", "batch": "v1"
+    },
+    "posts.newer": {
+      "use": "單篇頁的「下一篇」（較新那篇：endBefore 目前這篇、limitToLast 1）",
+      "who": ["reader"], "path": "posts",
+      "where": [["visible", "==", true]], "orderBy": [["date", "desc"]],
+      "limit": 1, "limitToLast": true, "cursor": "endBefore", "batch": "v1"
+    },
+    "posts.byCategory": {
+      "use": "分類頁",
+      "who": ["reader"], "path": "posts",
+      "where": [["visible", "==", true], ["category", "==", ":category"]], "orderBy": [["date", "desc"]],
+      "limit": 20, "cursor": "startAfter", "batch": "v1"
+    },
+    "posts.recent.teacher": {
+      "use": "導師看的首頁／列表／上一篇（含已下架）",
+      "who": ["teacher"], "path": "posts",
+      "orderBy": [["date", "desc"]],
+      "limit": 20, "cursor": "startAfter", "batch": "v1"
+    },
+    "posts.newer.teacher": {
+      "use": "導師看的下一篇（含已下架）",
+      "who": ["teacher"], "path": "posts",
+      "orderBy": [["date", "desc"]],
+      "limit": 1, "limitToLast": true, "cursor": "endBefore", "batch": "v1"
+    },
+    "posts.byCategory.teacher": {
+      "use": "導師看的分類頁（含已下架）",
+      "who": ["teacher"], "path": "posts",
+      "where": [["category", "==", ":category"]], "orderBy": [["date", "desc"]],
+      "limit": 20, "cursor": "startAfter", "batch": "v1"
+    },
+    "comments.thread": {
+      "use": "紀事、相簿、私密紀事三種留言串（即時）；{thread} 由 CMW.paths 產生（posts/<slug>、albums/<slug>、private_posts/<slug>），私密紀事的串要私密讀者",
+      "who": ["reader", "privateReader"], "path": "{thread}/comments",
+      "where": [["status", "==", "visible"]], "orderBy": [["createdAt", "desc"]],
+      "limit": 100, "watch": true, "batch": "v1"
+    },
+    "comments.thread.teacher": {
+      "use": "導師看的留言串（含已收起）",
+      "who": ["teacher"], "path": "{thread}/comments",
+      "orderBy": [["createdAt", "desc"]],
+      "limit": 100, "watch": true, "batch": "v1"
+    },
+    "comments.count": {
+      "use": "卡片上的留言數（導師也用這一個）",
+      "who": ["reader", "privateReader", "teacher"], "path": "{thread}/comments",
+      "where": [["status", "==", "visible"]], "count": true, "batch": "v1"
+    },
+    "comments.admin": {
+      "use": "留言後台：全站最新留言（集合群組）",
+      "who": ["teacher"], "group": "comments",
+      "orderBy": [["createdAt", "desc"]],
+      "limit": 200, "cursor": "startAfter", "watch": true, "batch": "v1"
+    },
+    "reads.all": {
+      "use": "單篇頁導師看已讀名單（X/N 的 X）",
+      "who": ["teacher"], "path": "{thread}/reads",
+      "limit": 200, "batch": "v1"
+    },
+    "reads.countParents": {
+      "use": "紀事卡片上的導師已讀徽章：家長回條數",
+      "who": ["teacher"], "path": "{thread}/reads",
+      "where": [["kind", "==", "parent"]], "count": true, "batch": "v1"
+    },
+    "reads.count": {
+      "use": "私密紀事卡片上的已讀數（分母＝私密名單人數，見 DATA-MODEL §2.8）",
+      "who": ["teacher"], "path": "{thread}/reads",
+      "count": true, "batch": "v1"
+    },
+    "albums.list": {
+      "use": "相簿列表、首頁相簿條",
+      "who": ["reader"], "path": "albums",
+      "where": [["visible", "==", true]],
+      "limit": 200, "sortClient": [["order", "asc"], ["date", "desc"]], "batch": "v1"
+    },
+    "albums.list.teacher": {
+      "use": "導師看的相簿列表（含已下架）",
+      "who": ["teacher"], "path": "albums",
+      "limit": 200, "sortClient": [["order", "asc"], ["date", "desc"]], "batch": "v1"
+    },
+    "photos.thumbs": {
+      "use": "相簿格、紀事／單頁的縮圖列；{owner} 是照片的主人文件（相簿、紀事、私密紀事、單頁、部落格文章），門票由主人文件決定",
+      "who": ["reader", "privateReader", "seatReader", "teacher"], "path": "{owner}/thumbs",
+      "orderBy": [["order", "asc"]],
+      "limit": 60, "cursor": "startAfter", "batch": "v1"
+    },
+    "private.list": {
+      "use": "私密紀事列表、併入紀事列表的鎖頭卡",
+      "who": ["privateReader"], "path": "private_posts",
+      "where": [["visible", "==", true]],
+      "limit": 100, "sortClient": [["date", "desc"]], "batch": "v1"
+    },
+    "private.list.teacher": {
+      "use": "導師看的私密紀事列表（含已下架）",
+      "who": ["teacher"], "path": "private_posts",
+      "limit": 100, "sortClient": [["date", "desc"]], "batch": "v1"
+    },
+    "pages.byKind": {
+      "use": "課程頁、專題活動卡片、關於我們等同類單頁",
+      "who": ["reader"], "path": "pages",
+      "where": [["visible", "==", true], ["kind", "==", ":kind"]],
+      "limit": 100, "sortClient": [["order", "asc"]], "batch": "v1"
+    },
+    "pages.byKind.teacher": {
+      "use": "導師看的同類單頁（含已下架）",
+      "who": ["teacher"], "path": "pages",
+      "where": [["kind", "==", ":kind"]],
+      "limit": 100, "sortClient": [["order", "asc"]], "batch": "v1"
+    },
+    "blogs.all": {
+      "use": "我的孩子導師端全班格",
+      "who": ["teacher"], "path": "student_blogs",
+      "limit": 40, "sortClient": [["seat", "asc"]], "batch": "v1"
+    },
+    "entries.bySeat": {
+      "use": "我的孩子：某個座號的文章列表（家長與同仁）",
+      "who": ["seatReader"], "path": "student_blogs/{seat}/entries",
+      "where": [["visible", "==", true]],
+      "limit": 300, "sortClient": [["date", "desc"], ["createdAt", "desc"]], "batch": "v1"
+    },
+    "entries.bySeat.teacher": {
+      "use": "導師看某個座號的文章（含已下架）",
+      "who": ["teacher"], "path": "student_blogs/{seat}/entries",
+      "limit": 300, "sortClient": [["date", "desc"], ["createdAt", "desc"]], "batch": "v1"
+    },
+    "entries.recentParent": {
+      "use": "導師端「家長新發的文」未讀（集合群組；比對導師本機的已看時間）",
+      "who": ["teacher"], "group": "entries",
+      "where": [["author", "==", "parent"]], "orderBy": [["createdAt", "desc"]],
+      "limit": 100, "batch": "v1"
+    },
+    "blogComments.thread": {
+      "use": "部落格文章底下導師與家長的對話串",
+      "who": ["seatParent"], "path": "{entry}/blog_comments",
+      "where": [["status", "==", "visible"]],
+      "limit": 200, "sortClient": [["createdAt", "asc"]], "batch": "v1"
+    },
+    "blogComments.thread.teacher": {
+      "use": "導師看的對話串（含已收起）",
+      "who": ["teacher"], "path": "{entry}/blog_comments",
+      "limit": 200, "sortClient": [["createdAt", "asc"]], "batch": "v1"
+    },
+    "blogComments.count": {
+      "use": "部落格文章卡片上的對話則數（導師也用這一個）",
+      "who": ["seatParent", "teacher"], "path": "{entry}/blog_comments",
+      "where": [["status", "==", "visible"]], "count": true, "batch": "v1"
+    },
+    "blogComments.recentParent": {
+      "use": "導師端「家長新留的話」未讀（集合群組）",
+      "who": ["teacher"], "group": "blog_comments",
+      "where": [["role", "==", "parent"]], "orderBy": [["createdAt", "desc"]],
+      "limit": 200, "batch": "v1"
+    },
+    "allowlist.all": {
+      "use": "導師端把留言上的作者代號（authorAlias）對回名單與身分",
+      "who": ["teacher"], "path": "allowlist",
+      "limit": 500, "batch": "v1"
+    },
+    "privateAllowlist.all": {
+      "use": "私密紀事已讀的分母（私密名單人數，不算導師）",
+      "who": ["teacher"], "path": "private_allowlist",
+      "limit": 500, "batch": "v1"
+    },
+    "parentMap.all": {
+      "use": "已讀 X/N 的 N、全班格的身分標示「A（母）」",
+      "who": ["teacher"], "path": "parent_child_map",
+      "limit": 500, "batch": "v1"
+    },
+    "seating.all": {
+      "use": "導師專用頁的座位表",
+      "who": ["teacher"], "path": "seating",
+      "limit": 100, "sortClient": [["date", "desc"]], "batch": "v1.1"
+    },
+    "personalPhotos.all": {
+      "use": "導師限定的個人照相簿：全班的個人照文件（照片本身再用 photoSrc 讀縮圖）",
+      "who": ["teacher"], "path": "personal_photos",
+      "limit": 40, "batch": "v1.1"
+    },
+    "parentPhotos.all": {
+      "use": "導師限定的個人照相簿：全班的家長合照文件（稱謂、備註、照片 pid）",
+      "who": ["teacher"], "path": "parent_photo_display",
+      "limit": 40, "batch": "v1.1"
+    },
+    "notifyQueue.due": {
+      "use": "v1.1 通知信：掃描到期的待寄佇列",
+      "who": ["functions"], "path": "blog_notify_queue",
+      "where": [["state", "==", "pending"], ["sendAfter", "<=", ":now"]], "orderBy": [["sendAfter", "asc"]],
+      "limit": 50, "batch": "v1.1"
+    }
+  },
+  "exempt": [
+    {"collectionGroup": "thumbs", "fieldPath": "data", "why": "縮圖 base64，不查詢；不建索引省空間"},
+    {"collectionGroup": "images", "fieldPath": "data", "why": "顯示圖 base64，不查詢"},
+    {"collectionGroup": "content", "fieldPath": "blocks", "why": "紀事正文區塊，不查詢"},
+    {"collectionGroup": "private_posts", "fieldPath": "blocks", "why": "私密紀事正文區塊，不查詢"},
+    {"collectionGroup": "pages", "fieldPath": "blocks", "why": "單頁正文區塊，不查詢"},
+    {"collectionGroup": "posts", "fieldPath": "coverThumb", "why": "列表卡片用的內嵌小縮圖，不查詢"},
+    {"collectionGroup": "albums", "fieldPath": "coverThumb", "why": "相簿卡片用的內嵌小縮圖，不查詢"},
+    {"collectionGroup": "student_blogs", "fieldPath": "avatar", "why": "內嵌頭像，不查詢"},
+    {"collectionGroup": "entries", "fieldPath": "body", "why": "部落格正文最長 10000 字，不查詢"}
+  ]
+}

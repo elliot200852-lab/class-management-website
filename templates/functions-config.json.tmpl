@@ -1,0 +1,11 @@
+{
+  "_comment": "由 scripts/build_config.py 從 config/class.json 產生，不要手改（被 .gitignore 擋住）。v1.1 選配通知信模組（functions/）部署時讀這份。裡面沒有任何信箱：收件與寄件信箱、署名在資料庫 config/notify（scripts/notify_config.py 寫）。備份門檻與 scripts/status.py 同一組（scripts/lib/thresholds.py）。",
+  "format": 1,
+  "projectId": {{FIREBASE_PROJECT_ID}},
+  "region": {{REGION}},
+  "siteUrl": {{SITE_URL}},
+  "timeZone": {{NOTIFY_TIME_ZONE}},
+  "digestHour": {{NOTIFY_DIGEST_HOUR}},
+  "backupRemindDays": {{BACKUP_REMIND_DAYS}},
+  "backupUrgentDays": {{BACKUP_URGENT_DAYS}}
+}

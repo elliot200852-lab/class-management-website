@@ -1,0 +1,8 @@
+# session.yaml — 這個課程單元的基本資料（給人看，也給代理查）。改了不用跑任何腳本。
+block: "{{block}}"          # 資料夾名（跟 data/units/ 底下的名字一樣；課堂檔案歸檔也用這個名字）
+title: "{{title}}"          # 顯示用的單元名稱
+school_year: "{{school_year}}"
+start: "{{start}}"          # 第一天 YYYY-MM-DD（還不確定就留空）
+end: "{{end}}"              # 最後一天 YYYY-MM-DD
+schedule: ""                # 上課時段說明（例如「每週二、四第三節」）
+lessons: 0                  # 預計幾堂（寫完逐堂教案再改）

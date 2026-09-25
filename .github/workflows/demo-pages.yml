@@ -1,0 +1,41 @@
+# 示範站：每次 main 有更新，就把 site/ 組成「示範模式」（虛構的一班、資料只存在瀏覽器）
+# 部署到本 repo 的 GitHub Pages。示範站不含任何 Firebase 設定，也不連任何資料庫。
+# fork 的人若不需要示範站，到 Settings → Pages 關掉即可。
+name: demo-pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: demo-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 組示範站
+        run: python scripts/build_site.py --demo --out build/demo
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/demo
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

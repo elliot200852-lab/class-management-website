@@ -1,0 +1,13 @@
+# Gemini CLI 讀檔時排除這幾個含真實姓名的檔案（跟 .claude/settings.json、.aiexclude 三處同步）。
+data/roster.csv
+data/contacts.csv
+data/students-named/**
+# 網站資料庫的本機快照（有全名、信箱）：代理只跑備份腳本、看輸出，不讀檔
+data/backups/**
+# 孩子與家長的照片（v1.1 個人照、家長合照）：代理只跑腳本、看腳本印的座號，不打開照片
+data/personal-photos/**
+data/parent-photos/**
+# 預覽檔與匯出檔（紀事、部落格、個人照的預覽頁有孩子的照片與稱呼；家長信的全文；資料退場要刪的登入帳號完整信箱）：
+# 腳本自己讀寫、印摘要，老師自己打開看；代理不打開
+exports/**
+data/exports/**

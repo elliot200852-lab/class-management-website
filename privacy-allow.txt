@@ -1,0 +1,24 @@
+# privacy_scan.py 的允許清單。逐行「路徑:行號」（相對掃描根目錄，POSIX 斜線），
+# # 開頭當註解、空白行忽略。只有確定是誤判時才加進來——寧可多花時間確認，
+# 也不要為了讓 CI 變綠就亂加。
+#
+# ── tests/rules/package-lock.json（npm 產生的鎖檔；2026-09-25 逐行確認過）──────────────
+# 行號會隨鎖檔重新產生而改變：改了 tests/rules/package.json 的版本、重跑 npm install 之後，
+# 要重新跑一次 privacy_scan，逐行確認新的命中仍然是下面這兩種誤判，再更新這裡的行號。
+#   google_id：套件的 "integrity": "sha512-…" 雜湊值（base64 裡剛好有一段長得像雲端 ID）
+#   email    ：npm 登錄檔裡第三方套件（glob）作者公開的聯絡信箱，出現在 "deprecated" 說明文字裡
+tests/rules/package-lock.json:645
+tests/rules/package-lock.json:1930
+tests/rules/package-lock.json:4459
+tests/rules/package-lock.json:4868
+tests/rules/package-lock.json:5584
+tests/rules/package-lock.json:5720
+tests/rules/package-lock.json:5972
+#
+# ── functions/package-lock.json（v1.1 通知信模組的 npm 鎖檔；2026-09-25 逐行確認過）──────────
+# 同上兩種誤判：integrity 的 sha512 雜湊、glob 的 "deprecated" 說明裡的作者公開信箱。鎖檔重新產生後照同樣的方式重新確認行號。
+functions/package-lock.json:1307
+functions/package-lock.json:1324
+functions/package-lock.json:1636
+functions/package-lock.json:2262
+functions/package-lock.json:2771

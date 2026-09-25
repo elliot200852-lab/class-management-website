@@ -1,0 +1,32 @@
+{
+  "_comment": "emailKey 正規化的共用測試向量。Python（tests/test_emailkey.py）與前端（tests/js/）讀同一份，規則測試（tests/rules/，P3）也用它造登入身分。email 刻意拆成 [@ 前, @ 後] 兩段存：這份檔會被 privacy_scan 掃到，完整的非 example.com 信箱字樣不能連續出現在 repo 裡。規格見 docs/DATA-MODEL.md §0.3。",
+  "valid": [
+    {"why": "全部轉小寫", "in": ["Parent.A", "Example.COM"], "out": ["parent.a", "example.com"]},
+    {"why": "非 gmail 網域：點號照留", "in": ["parent.a", "example.com"], "out": ["parent.a", "example.com"]},
+    {"why": "非 gmail 網域：大小寫混合＋點號照留", "in": ["Staff.Member.One", "School.Example.COM"], "out": ["staff.member.one", "school.example.com"]},
+    {"why": "gmail：點號全部拿掉", "in": ["parent.a", "gmail.com"], "out": ["parenta", "gmail.com"]},
+    {"why": "gmail：大寫＋多個點號", "in": ["P.A.R.E.N.T.A", "GMAIL.COM"], "out": ["parenta", "gmail.com"]},
+    {"why": "googlemail：網域統一成 gmail.com", "in": ["parent.a", "googlemail.com"], "out": ["parenta", "gmail.com"]},
+    {"why": "googlemail：大小寫混合", "in": ["Parent.A", "GoogleMail.Com"], "out": ["parenta", "gmail.com"]},
+    {"why": "gmail：加號後綴照留（只拿點號）", "in": ["parent.a+class", "gmail.com"], "out": ["parenta+class", "gmail.com"]},
+    {"why": "前後空白去掉", "in": ["  parent.a", "example.com  "], "out": ["parent.a", "example.com"]},
+    {"why": "前後空白＋tab＋換行去掉（gmail）", "in": ["\t Parent.A", "gmail.com \n"], "out": ["parenta", "gmail.com"]},
+    {"why": "gmail 的子網域不算 gmail：點號照留", "in": ["parent.a", "mail.gmail.com"], "out": ["parent.a", "mail.gmail.com"]},
+    {"why": "長得像 gmail 但不是：點號照留", "in": ["parent.a", "gmail.co"], "out": ["parent.a", "gmail.co"]}
+  ],
+  "invalid": [
+    {"why": "空字串", "in": ["", ""], "join": ""},
+    {"why": "只有空白", "in": ["   ", ""], "join": ""},
+    {"why": "沒有 @", "in": ["parent.a", "example.com"], "join": ""},
+    {"why": "兩個 @", "in": ["parent@a", "example.com"], "join": "@"},
+    {"why": "@ 前面是空的", "in": ["", "example.com"], "join": "@"},
+    {"why": "@ 後面是空的", "in": ["parent.a", ""], "join": "@"},
+    {"why": "網域沒有點號", "in": ["parent.a", "localhost"], "join": "@"},
+    {"why": "含單引號（規則注入）", "in": ["x'||true||'", "example.com"], "join": "@"},
+    {"why": "含雙引號", "in": ["x\"y", "example.com"], "join": "@"},
+    {"why": "含反斜線", "in": ["x\\y", "example.com"], "join": "@"},
+    {"why": "中間有空白", "in": ["parent a", "example.com"], "join": "@"},
+    {"why": "非 ASCII 字元", "in": ["家長", "example.com"], "join": "@"},
+    {"why": "gmail 去掉點號後是空的", "in": ["...", "gmail.com"], "join": "@"}
+  ]
+}

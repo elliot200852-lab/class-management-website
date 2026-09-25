@@ -1,0 +1,524 @@
+rules_version = '2';
+
+// 由 scripts/build_config.py 從 templates/firestore.rules.tmpl 產生——不要手改產生出來的 firestore.rules。
+// 正本是 docs/DATA-MODEL.md（每個集合的權限表、欄位白名單；附錄 A 是這份樣板的逐字複本，單元測試會比對）。
+// 改規則的順序：改 DATA-MODEL → 改這份樣板（連附錄 A 一起）→ python3 scripts/test_rules.py 全綠。
+//
+// 寫法約定（改的人一定要守）：
+//  · 讀文件（get／exists）要先用函式參數接住再用：同一份文件在一條規則裡只寫一次 get。
+//    正式環境「查詢」的存取上限是 10 次（模擬器量到 20，模擬器全綠不代表線上不會超過），
+//    scripts/lib/rules_budget.py 對每條 allow 估最壞情況的次數，超過 10 測試就失敗。
+//  · 會讀 resource 的集合，get 與 list 分開寫：get 多放一條 resource == null（不存在的文件回「找不到」），list 不放。
+//  · 規則評估出錯＝拒絕。文件先判斷不是 null 再取欄位；可能沒有的欄位用 .get(欄位, 預設值)。
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ══ 身分（DATA-MODEL §1）════════════════════════════════════════════
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // email 已驗證，而且 email 的寫法與 scripts/lib/emailkey.py 的 EMAIL_RE 同一套
+    // （剛好一個 @、前後都不是空的、不含引號空白等字元；gmail 去掉點號後不能是空的）。
+    // emailKey() 只准在這個為真之後呼叫。
+    function verified() {
+      return signedIn()
+        && request.auth.token.get('email', null) is string
+        && request.auth.token.get('email_verified', false) == true
+        && request.auth.token.email.trim().matches('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}$')
+        && !emailKey().matches('^@.*$');
+    }
+
+    // Google 登入。email 連結登入的 sign_in_provider 是 'password'，不算。
+    function isGoogle() {
+      return request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'google.com';
+    }
+
+    // email 鍵（DATA-MODEL §0.3）：前後空白去掉、小寫；gmail／googlemail 去掉 @ 前面的點號並統一成 gmail.com。
+    // 與 scripts/lib/emailkey.py、site/js/core/emailkey.js 同一套，共用 tests/fixtures/emailkey_vectors.json。
+    // replace() 的第一個參數是 RE2 正規式：點號一定要寫 '[.]'（寫 '.' 會把每個字都換掉）。
+    function emailKey() {
+      let e = request.auth.token.email.trim().lower();
+      let parts = e.split('@');
+      return (parts[1] == 'gmail.com' || parts[1] == 'googlemail.com')
+        ? parts[0].replace('[.]', '') + '@gmail.com'
+        : e;
+    }
+
+    // 導師：email 已驗證＋Google 登入＋email 鍵等於導師的。
+    // {{TEACHER_EMAIL_KEY}} 由 build_config.py 代換成含雙引號的字串（已過 EMAIL_RE，不含引號與反斜線）。
+    function isTeacher() {
+      return verified() && isGoogle() && emailKey() == {{TEACHER_EMAIL_KEY}};
+    }
+
+    // 自己的 allowlist 文件（不在名單＝null）。只在 verified() 為真之後呼叫。
+    function allowDoc() {
+      return get(/databases/$(database)/documents/allowlist/$(emailKey()));
+    }
+
+    // 班網讀者：email 已驗證而且在 allowlist。刻意不讓導師短路：導師也在名單裡，
+    // 需要導師通行的地方一律寫 isTeacher() || (isReader() && …)。
+    function isReader() {
+      return verified() && allowDoc() != null;
+    }
+
+    // 私密讀者：導師，或（讀者而且在 private_allowlist）
+    function isPrivateReader() {
+      return isTeacher() || (isReader()
+        && exists(/databases/$(database)/documents/private_allowlist/$(emailKey())));
+    }
+
+    // 座號權限（DATA-MODEL §1.1）：一律同時是讀者＋Google 登入＋自己的 parent_child_map 有效且含這個座號。
+    // m＝parent_child_map 的自己那份（可能是 null）。
+    function seatGrants(m, seat, kinds) {
+      return m != null
+        && m.data.get('active', false) == true
+        && m.data.get('kind', '') in kinds
+        && m.data.get('seats', []) is list
+        && seat in m.data.get('seats', []);
+    }
+    function hasSeat(seat, kinds) {
+      return isReader() && isGoogle()
+        && seatGrants(get(/databases/$(database)/documents/parent_child_map/$(emailKey())), seat, kinds);
+    }
+    function isParentOf(seat) {
+      return hasSeat(seat, ['parent']);
+    }
+    function isSeatReaderOf(seat) {
+      return hasSeat(seat, ['parent', 'staff']);
+    }
+
+    // ══ 格式（DATA-MODEL §0.4）══════════════════════════════════════════
+
+    function validSeat(s) {
+      return s is string && s.matches('^(0[1-9]|[1-3][0-9]|40)$');
+    }
+    function validDate(s) {
+      return s is string && s.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+    function validPostId(s) {
+      return s is string && s.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]{8}$');
+    }
+    function validAlias(s) {
+      return s is string && s.matches('^[a-z0-9]{12}$');
+    }
+    function strLen(s, lo, hi) {
+      return s is string && s.size() >= lo && s.size() <= hi;
+    }
+    function intIn(n, lo, hi) {
+      return n is int && n >= lo && n <= hi;
+    }
+    // d＝某份文件（可能是 null）；存在而且 visible == true
+    function visibleDoc(d) {
+      return d != null && d.data.get('visible', false) == true;
+    }
+
+    // ══ 三種討論串共用：留言、回條（DATA-MODEL §2.7、§2.8）══════════════
+
+    // 新留言的欄位。me＝自己的 allowlist 文件（呼叫端傳 allowDoc()，同一份只讀一次）。
+    function validNewComment(me) {
+      let d = request.resource.data;
+      return me != null
+        && d.keys().hasAll(['authorName', 'body', 'role', 'authorAlias', 'status', 'createdAt'])
+        && d.keys().hasOnly(['authorName', 'body', 'role', 'authorAlias', 'status', 'createdAt', 'replyTo'])
+        && strLen(d.authorName, 1, 20)
+        && strLen(d.body, 1, 500)
+        && d.role in ['teacher', 'parent', 'staff']
+        && d.role == me.data.get('kind', '')
+        && (d.role != 'teacher' || isTeacher())
+        && validAlias(d.authorAlias)
+        && d.authorAlias == me.data.get('alias', '')
+        && d.status == 'visible'
+        && d.createdAt == request.time
+        && (!('replyTo' in d) || (d.replyTo is string && d.replyTo.matches('^[A-Za-z0-9]{1,64}$')));
+    }
+
+    // 建留言：導師（父文件存在即可，不論可見），或有門票（ticket）而且父文件存在且可見；欄位另驗。
+    // ticket＝呼叫端算好的 isReader()／isPrivateReader()；parent＝父文件（可能是 null）。
+    function canCreateComment(ticket, parent) {
+      return ((isTeacher() && parent != null) || (ticket && visibleDoc(parent)))
+        && validNewComment(allowDoc());
+    }
+
+    // 留言只准改 status（導師收起／還原）
+    function onlyStatusChange() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['visible', 'hidden'];
+    }
+
+    // 回條：doc id 必須是自己的 email 鍵；kind 等於自己名單上的 kind 而且不是導師；readAt 是伺服器時間。
+    function validReceipt(key, me) {
+      let d = request.resource.data;
+      return me != null
+        && key == emailKey()
+        && d.keys().hasAll(['kind', 'readAt'])
+        && d.keys().hasOnly(['kind', 'readAt'])
+        && d.kind in ['parent', 'staff']
+        && d.kind == me.data.get('kind', '')
+        && d.readAt == request.time;
+    }
+
+    // ══ 名單與探針（DATA-MODEL §2.1–§2.4）════════════════════════════════
+
+    // 自己那份：email 已驗證就能讀（不在名單回「找不到」，前端靠這個判斷「尚未授權」）
+    match /allowlist/{key} {
+      allow get: if isTeacher() || (verified() && key == emailKey());
+      allow list: if isTeacher();
+      allow write: if false;
+    }
+
+    match /private_allowlist/{key} {
+      allow get: if isTeacher() || (verified() && key == emailKey());
+      allow list: if isTeacher();
+      allow write: if false;
+    }
+
+    // 導師探針：文件不存在；只有導師 get 得到「找不到」，其他人一律被拒
+    match /site_access/{probe} {
+      allow get: if probe == 'teacher' && isTeacher();
+      allow list, write: if false;
+    }
+
+    // 自己那份：要讀者＋Google 登入
+    match /parent_child_map/{key} {
+      allow get: if isTeacher() || (isReader() && isGoogle() && key == emailKey());
+      allow list: if isTeacher();
+      allow write: if false;
+    }
+
+    // ══ 站台與導師限定（DATA-MODEL §2.5、§2.16、§2.17）════════════════════
+
+    match /config/{id} {
+      allow get: if isTeacher() || (id == 'site' && isReader());
+      allow list, write: if false;
+    }
+
+    match /roster/{id} {
+      allow get: if isTeacher();
+      allow list, write: if false;
+    }
+
+    match /ops/{id} {
+      allow get: if isTeacher();
+      allow list, write: if false;
+    }
+
+    // ══ 班級紀事（DATA-MODEL §2.6–§2.8、§2.12）══════════════════════════
+
+    match /posts/{slug} {
+      function postDoc() {
+        return get(/databases/$(database)/documents/posts/$(slug));
+      }
+
+      allow get: if isTeacher() || (isReader() && (resource == null || resource.data.visible == true));
+      allow list: if isTeacher() || (isReader() && resource.data.visible == true);
+      allow write: if false;
+
+      match /content/{docId} {
+        allow get: if docId == 'main' && (isTeacher() || (isReader() && visibleDoc(postDoc())));
+        allow list, write: if false;
+      }
+      match /thumbs/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(postDoc()));
+        allow write: if false;
+      }
+      match /images/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(postDoc()));
+        allow write: if false;
+      }
+      match /comments/{cid} {
+        allow get: if isTeacher()
+          || (isReader() && visibleDoc(postDoc()) && (resource == null || resource.data.status == 'visible'));
+        allow list: if isTeacher()
+          || (isReader() && visibleDoc(postDoc()) && resource.data.status == 'visible');
+        allow create: if canCreateComment(isReader(), postDoc());
+        allow update: if isTeacher() && onlyStatusChange();
+        allow delete: if false;
+      }
+      match /reads/{key} {
+        allow get: if isTeacher() || (isReader() && key == emailKey());
+        allow list: if isTeacher();
+        allow create: if isReader() && visibleDoc(postDoc()) && validReceipt(key, allowDoc());
+        allow update, delete: if false;
+      }
+    }
+
+    // ══ 相簿（DATA-MODEL §2.9）═════════════════════════════════════════
+
+    match /albums/{slug} {
+      function albumDoc() {
+        return get(/databases/$(database)/documents/albums/$(slug));
+      }
+
+      allow get: if isTeacher() || (isReader() && (resource == null || resource.data.visible == true));
+      allow list: if isTeacher() || (isReader() && resource.data.visible == true);
+      allow write: if false;
+
+      match /thumbs/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(albumDoc()));
+        allow write: if false;
+      }
+      match /images/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(albumDoc()));
+        allow write: if false;
+      }
+      match /comments/{cid} {
+        allow get: if isTeacher()
+          || (isReader() && visibleDoc(albumDoc()) && (resource == null || resource.data.status == 'visible'));
+        allow list: if isTeacher()
+          || (isReader() && visibleDoc(albumDoc()) && resource.data.status == 'visible');
+        allow create: if canCreateComment(isReader(), albumDoc());
+        allow update: if isTeacher() && onlyStatusChange();
+        allow delete: if false;
+      }
+    }
+
+    // ══ 私密紀事（DATA-MODEL §2.10）══════════════════════════════════════
+    // 不存在的私密紀事：沒有私密門票的人照樣被拒（不洩漏「有沒有這一篇」）。
+
+    match /private_posts/{slug} {
+      function privateDoc() {
+        return get(/databases/$(database)/documents/private_posts/$(slug));
+      }
+
+      allow get: if isTeacher() || (isPrivateReader() && (resource == null || resource.data.visible == true));
+      allow list: if isTeacher() || (isPrivateReader() && resource.data.visible == true);
+      allow write: if false;
+
+      match /thumbs/{pid} {
+        allow read: if isTeacher() || (isPrivateReader() && visibleDoc(privateDoc()));
+        allow write: if false;
+      }
+      match /images/{pid} {
+        allow read: if isTeacher() || (isPrivateReader() && visibleDoc(privateDoc()));
+        allow write: if false;
+      }
+      match /comments/{cid} {
+        allow get: if isTeacher()
+          || (isPrivateReader() && visibleDoc(privateDoc()) && (resource == null || resource.data.status == 'visible'));
+        allow list: if isTeacher()
+          || (isPrivateReader() && visibleDoc(privateDoc()) && resource.data.status == 'visible');
+        allow create: if canCreateComment(isPrivateReader(), privateDoc());
+        allow update: if isTeacher() && onlyStatusChange();
+        allow delete: if false;
+      }
+      match /reads/{key} {
+        allow get: if isTeacher() || (isPrivateReader() && key == emailKey());
+        allow list: if isTeacher();
+        allow create: if isPrivateReader() && visibleDoc(privateDoc()) && validReceipt(key, allowDoc());
+        allow update, delete: if false;
+      }
+    }
+
+    // ══ 單頁（DATA-MODEL §2.11）═════════════════════════════════════════
+
+    match /pages/{pageId} {
+      function pageDoc() {
+        return get(/databases/$(database)/documents/pages/$(pageId));
+      }
+
+      allow get: if isTeacher() || (isReader() && (resource == null || resource.data.visible == true));
+      allow list: if isTeacher() || (isReader() && resource.data.visible == true);
+      allow write: if false;
+
+      match /thumbs/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(pageDoc()));
+        allow write: if false;
+      }
+      match /images/{pid} {
+        allow read: if isTeacher() || (isReader() && visibleDoc(pageDoc()));
+        allow write: if false;
+      }
+    }
+
+    // ══ 部落格（DATA-MODEL §2.13–§2.15）═════════════════════════════════
+    // 家長不能 list 整個 student_blogs（規則無法對每一份證明座號相符），只能 get 自己座號那份。
+
+    match /student_blogs/{seat} {
+      allow get: if isTeacher() || (validSeat(seat) && isSeatReaderOf(seat));
+      allow list: if isTeacher();
+      allow write: if false;
+
+      match /entries/{postId} {
+        function entryDoc() {
+          return get(/databases/$(database)/documents/student_blogs/$(seat)/entries/$(postId));
+        }
+
+        // photos 的第 i 個：{ pid: 'i', w, h, caption? }
+        function validPhotoRef(p, pid) {
+          return p is map
+            && p.keys().hasAll(['pid', 'w', 'h'])
+            && p.keys().hasOnly(['pid', 'w', 'h', 'caption'])
+            && p.pid == pid
+            && intIn(p.w, 1, 1600)
+            && intIn(p.h, 1, 1600)
+            && (!('caption' in p) || strLen(p.caption, 0, 300));
+        }
+        function validPhotos(ps) {
+          return ps is list && ps.size() <= 3
+            && (ps.size() < 1 || validPhotoRef(ps[0], '0'))
+            && (ps.size() < 2 || validPhotoRef(ps[1], '1'))
+            && (ps.size() < 3 || validPhotoRef(ps[2], '2'));
+        }
+        // 新文章。author：導師 'teacher'、家長 'parent'；me＝自己的 allowlist 文件。
+        function validNewEntry(author, me) {
+          let d = request.resource.data;
+          return me != null
+            && d.keys().hasAll(['title', 'body', 'date', 'author', 'authorAlias', 'photos', 'visible', 'createdAt'])
+            && d.keys().hasOnly(['title', 'body', 'date', 'author', 'authorAlias', 'photos', 'visible', 'createdAt'])
+            && strLen(d.title, 1, 200)
+            && strLen(d.body, 1, 10000)
+            && validDate(d.date)
+            && d.author == author
+            && validAlias(d.authorAlias)
+            && d.authorAlias == me.data.get('alias', '')
+            && d.visible == true
+            && d.createdAt == request.time
+            && validPhotos(d.photos);
+        }
+        // 導師改文：只准動 title、body、visible、updatedAt
+        function validEntryEdit() {
+          let d = request.resource.data;
+          return d.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'visible', 'updatedAt'])
+            && strLen(d.title, 1, 200)
+            && strLen(d.body, 1, 10000)
+            && d.visible is bool
+            && d.updatedAt == request.time;
+        }
+        // 瀏覽器只准在部落格文章底下建照片：pid 只能是 '0'、'1'、'2'；導師或該座號家長。
+        function canCreatePhoto(pid) {
+          return validSeat(seat) && validPostId(postId) && pid.matches('^[0-2]$')
+            && (isTeacher() || isParentOf(seat));
+        }
+        function validThumb(pid) {
+          let d = request.resource.data;
+          return d.keys().hasAll(['data', 'w', 'h', 'order'])
+            && d.keys().hasOnly(['data', 'w', 'h', 'order'])
+            && strLen(d.data, 1, 49152)
+            && intIn(d.w, 1, 480)
+            && intIn(d.h, 1, 480)
+            && d.order is int && d.order == int(pid);
+        }
+        function validImage() {
+          let d = request.resource.data;
+          return d.keys().hasAll(['data', 'w', 'h'])
+            && d.keys().hasOnly(['data', 'w', 'h'])
+            && strLen(d.data, 1, 716800)
+            && intIn(d.w, 1, 1600)
+            && intIn(d.h, 1, 1600);
+        }
+
+        allow get: if isTeacher()
+          || (isSeatReaderOf(seat) && (resource == null || resource.data.visible == true));
+        allow list: if isTeacher() || (isSeatReaderOf(seat) && resource.data.visible == true);
+        // 同一個 postId 第二次寫＝改（只有導師改文那條）→ 家長重送一律被拒，重試要換新 postId
+        allow create: if validSeat(seat) && validPostId(postId)
+          && validNewEntry(isTeacher() ? 'teacher' : 'parent', allowDoc())
+          && (isTeacher() || isParentOf(seat));
+        allow update: if isTeacher() && validEntryEdit();
+        allow delete: if false;
+
+        // 照片不可變：只准建，不准改、不准刪（換照片＝新 pid）
+        match /thumbs/{pid} {
+          allow read: if isTeacher() || (isSeatReaderOf(seat) && visibleDoc(entryDoc()));
+          allow create: if canCreatePhoto(pid) && validThumb(pid);
+          allow update, delete: if false;
+        }
+        match /images/{pid} {
+          allow read: if isTeacher() || (isSeatReaderOf(seat) && visibleDoc(entryDoc()));
+          allow create: if canCreatePhoto(pid) && validImage();
+          allow update, delete: if false;
+        }
+
+        // 對話串只屬於導師和「那個孩子的家長」：同仁可以看文章，看不到對話
+        match /blog_comments/{cid} {
+          function validNewBlogComment(role, me) {
+            let d = request.resource.data;
+            return me != null
+              && d.keys().hasAll(['body', 'role', 'authorAlias', 'status', 'createdAt'])
+              && d.keys().hasOnly(['body', 'role', 'authorAlias', 'status', 'createdAt'])
+              && strLen(d.body, 1, 500)
+              && d.role == role
+              && validAlias(d.authorAlias)
+              && d.authorAlias == me.data.get('alias', '')
+              && d.status == 'visible'
+              && d.createdAt == request.time;
+          }
+          // entry＝文章（可能是 null）：導師要文章存在，家長要文章存在且可見
+          function canCreateBlogComment(entry) {
+            return (isTeacher() ? entry != null : (isParentOf(seat) && visibleDoc(entry)))
+              && validNewBlogComment(isTeacher() ? 'teacher' : 'parent', allowDoc());
+          }
+          // 家長只能把自己那則從 visible 改成 hidden，不能改回；導師收起或還原任何一則
+          function canChangeStatus() {
+            return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+              && request.resource.data.status in ['visible', 'hidden']
+              && (isTeacher()
+                || (isParentOf(seat)
+                  && resource.data.authorAlias == allowDoc().data.get('alias', '')
+                  && resource.data.status == 'visible'
+                  && request.resource.data.status == 'hidden'));
+          }
+
+          allow get: if isTeacher()
+            || (isParentOf(seat) && visibleDoc(entryDoc()) && (resource == null || resource.data.status == 'visible'));
+          allow list: if isTeacher()
+            || (isParentOf(seat) && visibleDoc(entryDoc()) && resource.data.status == 'visible');
+          allow create: if canCreateBlogComment(entryDoc());
+          allow update: if canChangeStatus();
+          allow delete: if false;
+        }
+      }
+    }
+
+    // ══ v1.1 集合（DATA-MODEL §2.18）：只有導師讀，網頁不寫 ══════════════
+
+    match /seating/{planId} {
+      allow read: if isTeacher();
+      allow write: if false;
+    }
+    match /parent_photo_display/{seat} {
+      allow read: if isTeacher();
+      allow write: if false;
+      match /{sub}/{pid} {
+        allow read: if isTeacher() && sub in ['thumbs', 'images'];
+        allow write: if false;
+      }
+    }
+    match /personal_photos/{seat} {
+      allow read: if isTeacher();
+      allow write: if false;
+      match /{sub}/{pid} {
+        allow read: if isTeacher() && sub in ['thumbs', 'images'];
+        allow write: if false;
+      }
+    }
+    match /blog_notify_queue/{qid} {
+      allow read: if isTeacher();
+      allow write: if false;
+      match /sent/{h} {
+        allow read: if isTeacher();
+        allow write: if false;
+      }
+    }
+
+    // ══ 導師的集合群組讀取（DATA-MODEL §2.19）：與上面各路徑是聯集，只開給導師 ══
+
+    match /{path=**}/comments/{cid} {
+      allow read: if isTeacher();
+    }
+    match /{path=**}/entries/{postId} {
+      allow read: if isTeacher();
+    }
+    match /{path=**}/blog_comments/{cid} {
+      allow read: if isTeacher();
+    }
+
+    // ══ 預設拒絕（DATA-MODEL §2.20）：上面沒列到的路徑一律拒絕。這一條永遠放最後。══
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

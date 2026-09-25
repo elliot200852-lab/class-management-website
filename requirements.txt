@@ -1,0 +1,4 @@
+# 只有一個第三方套件：Pillow（只有處理照片的腳本會用到）。
+# 官方安裝說明：https://pillow.readthedocs.io/en/stable/installation/basic-installation.html
+# 請老師自己貼：python3 -m pip install --user Pillow（Windows：py -3 -m pip install --user Pillow）
+Pillow>=10

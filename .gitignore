@@ -1,0 +1,55 @@
+# ════════════════════════════════════════════════════════════════
+# 個資／機密 —— 以下一律「絕不」進 git
+# ════════════════════════════════════════════════════════════════
+# 這一班的全部真實資料（名冊、聯絡資訊、紀事母本、相簿、備份……）；範本是 data-template/
+data/
+# 這個班的真實設定（含 email、Firebase 專案 id）；範本是 config/class.example.json
+config/class.json
+config/*.bak
+# 由 scripts/build_config.py 產生的檔（含真實 Firebase 設定，會隨 templates/ 增加而變多）
+site/js/site-config.js
+firestore.rules
+.firebaserc
+# 注意：firestore.indexes.json 與 site/js/core/queries.js 也是產生檔，但**要進 git**
+# （由 scripts/build_indexes.py 從 templates/queries.json 產生，跟班級設定無關、不含秘密）。
+# 安裝進度（可能含這位老師的答案）
+setup/progress.json
+# 環境變數與金鑰——只擋特定檔名，不要用 *.json 那種會連 config/class.example.json 一起擋掉的寫法
+.env
+*-key.json
+serviceAccount*.json
+service-account*.json
+credentials.json
+
+# ════════════════════════════════════════════════════════════════
+# 一般
+# ════════════════════════════════════════════════════════════════
+# 只擋 repo 根目錄的這三個夾（前面加 /）：不加的話會連 data-template/backups/、data-template/exports/
+# 的 README 一起擋掉，新 clone 下來的空白框架就少兩個資料夾。
+/exports/
+/logs/
+/backups/
+# scripts/build_site.py 的輸出（正式網站、示範站）
+/build/
+# scripts/try_emulator.py 的試玩資料夾（虛構的一班；收掉時整個刪掉）
+/try/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.firebase/
+firebase-debug.log
+firestore-debug.log
+.DS_Store
+Thumbs.db
+
+# ════════════════════════════════════════════════════════════════
+# v1.1 選配通知信模組（functions/）
+# ════════════════════════════════════════════════════════════════
+# build_config.py 的產生檔（專案、地區、網址；沒有信箱，但一樣是這個班的設定）
+functions/cmw.generated.json
+# Firebase CLI／模擬器的本機檔（.secret.local、.env.local、.runtimeconfig.json 之類；秘密不准進 git）
+functions/*.local
+functions/.env*
+functions/.runtimeconfig.json
+functions/.test-run/

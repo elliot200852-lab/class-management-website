@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(data/roster.csv)",
+      "Read(data/contacts.csv)",
+      "Read(data/students-named/**)",
+      "Read(data/backups/**)",
+      "Read(data/personal-photos/**)",
+      "Read(data/parent-photos/**)",
+      "Read(exports/**)",
+      "Read(data/exports/**)"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+---
+description: 專案安裝與操作規則入口，一律先讀 AGENTS.md
+alwaysApply: true
+---
+
+這個專案的安裝與操作規則只有一份正本：根目錄的 [AGENTS.md](../../AGENTS.md)。
+開始任何工作前，請先完整讀過那份檔案；這份 `.mdc` 不重複內容，只負責把 Cursor 指過去。

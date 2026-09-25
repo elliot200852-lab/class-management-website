@@ -1,0 +1,26 @@
+/* 由 scripts/build_config.py 產生 —— 不要手改。
+   改設定請改 config/class.json，再重跑：
+     python3 scripts/build_config.py   （Windows：py -3 scripts\build_config.py）
+   傳統 <script src> 載入，不是 module。
+
+   這個檔部署後任何人都抓得到（它是網站的一部分），所以只放網站「還沒登入就要用到」的值：
+   Firebase 網頁設定、網站正式網址、班名、頁面開關、分類、版本；emulator 只有冒煙測試
+   （build_config.py --emulator）才是 true，正式網站永遠是 false。
+   導師 email、學校名、學生人數、行事曆網址、通知開關**不准**加進來——
+   build_config.py 只允許這個樣板用 PUBLIC_KEYS 裡的欄位，多用一個就拒跑。
+   （那些值在登入後由網頁從資料庫的 config/site 讀；導師 email 只進安全規則。） */
+window.SITE_CONFIG = {
+  className: {{CLASS_NAME}},
+  siteUrl: {{SITE_URL}},
+  firebase: {
+    projectId: {{FIREBASE_PROJECT_ID}},
+    apiKey: {{FIREBASE_API_KEY}},
+    authDomain: {{FIREBASE_AUTH_DOMAIN}},
+    appId: {{FIREBASE_APP_ID}},
+    messagingSenderId: {{FIREBASE_MESSAGING_SENDER_ID}}
+  },
+  pages: {{PAGES}},
+  categories: {{CATEGORIES}},
+  version: {{VERSION}},
+  emulator: {{EMULATOR}}
+};

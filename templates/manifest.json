@@ -1,0 +1,9 @@
+{
+  "_comment": "scripts/build_config.py 讀這份對照表：每一筆把 src（templates/ 底下的樣板）渲染到 dest（相對 repo 根的輸出路徑）。public: true 的輸出會被部署成任何人都抓得到的檔，樣板只准用 build_config.py 的 PUBLIC_KEYS。安全規則樣板 firestore.rules.tmpl 是 public: false（用 {{TEACHER_EMAIL_KEY}}；產生的 firestore.rules 被 .gitignore 擋住，規則測試見 scripts/test_rules.py）。firestore.indexes.json 不在這裡：它跟班級設定無關，由 scripts/build_indexes.py 從 templates/queries.json 產生並進 git。",
+  "templates": [
+    {"src": "site-config.js.tmpl", "dest": "site/js/site-config.js", "public": true},
+    {"src": "firebaserc.tmpl", "dest": ".firebaserc", "public": false},
+    {"src": "firestore.rules.tmpl", "dest": "firestore.rules", "public": false},
+    {"src": "functions-config.json.tmpl", "dest": "functions/cmw.generated.json", "public": false}
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "class_name": "我的班級",
+  "school_name": "",
+  "teacher": {
+    "email": "teacher@example.com",
+    "display_name": "老師"
+  },
+  "students": {
+    "count": 25
+  },
+  "seat_format": "座號固定寫法：兩位數字字串 01–40（例如 01、02……40）。這一欄只是說明，程式不會讀它。",
+  "region": "asia-east1",
+  "firebase": {
+    "project_id": "your-project-id",
+    "api_key": "請填入你的 Firebase apiKey（Firebase Console → 專案設定 → 一般 → 你的應用程式）",
+    "auth_domain": "",
+    "app_id": "",
+    "messaging_sender_id": ""
+  },
+  "pages": {
+    "home": true,
+    "class_posts": true,
+    "gallery": true,
+    "my_child": true,
+    "teacher_only": true,
+    "courses": true,
+    "fun": true,
+    "about": true
+  },
+  "categories": ["班級生活", "學習活動", "戶外與參訪", "藝術與作品", "公告"],
+  "school_year": {
+    "start_month": 8,
+    "terms": ["上學期", "下學期"],
+    "term_aliases": {}
+  },
+  "calendar_ics_url": "",
+  "drive": {
+    "sync_root": ""
+  },
+  "notifications": {
+    "enabled": false,
+    "sender_name": "",
+    "signature": "",
+    "gmail_address": "",
+    "time_zone": "Asia/Taipei",
+    "digest_hour": 7
+  }
+}
