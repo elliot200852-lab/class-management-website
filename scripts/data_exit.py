@@ -15,12 +15,16 @@
     要多加 --new-roster 才寫，免得上一屆的名單檔一同步就把上一屆的家長全部加回去。
   · 本機的三個名單檔（roster.csv、contacts.csv、parent-roles.yaml）由老師自己先改好；還沒改就停下來，
     不然下次名單同步會把人加回去。
+  · --apply 動手前先記一筆退場台帳 data/ledgers/data-exit.jsonl（座號；email 鍵與作者代號只存雜湊）：
+    backup.py restore firestore 看它，比退場早的快照不會把這些人的資料寫回網站。
+  · 本機與同步夾的資料夾逐項刪、刪完讀回確認不在；刪不掉的（雲端硬碟程式鎖著檔）列出來、exit 1。
 
 三種情況：
   seat 05             學生轉出（座號 05）：撤掉只對應這個座號的家長；刪部落格（文章、照片、對話）、名冊那一筆、
                       回條；那些家長的留言預設**收起並改署名「已退場家長」**（留言串牽涉別的家長），
                       加 --delete-comments 才整則刪；刪 data/student-blogs/05/、同步夾 04_部落格歸檔/05/ 與 學生個別資料/05/。
-  parent --email X    家長要求刪除自己的資料：撤名單；刪他的留言、回條、他發的部落格文章（連照片與對話）、他在對話串的留言。
+  parent --email X    家長要求刪除自己的資料：撤名單；刪他的留言、回條、他發的部落格文章（連照片與對話）、他在對話串的留言，
+                      以及他孩子座號底下的孤兒照片（部落格文章沒列到的照片文件；DATA-MODEL §1.6）。
   year-end --mode M   學年結束：先備份資料庫＋匯出部落格，再撤掉所有人的權限（只留導師），然後依 M：
                         archive  封存：資料留著，只有導師看得到
                         photos   只清照片（騰出免費方案的 1 GiB），文字留著
@@ -36,6 +40,7 @@
 
 exit code：0 成功；2 停下來了（前置條件不符、一筆都沒刪）；1 做到一半失敗（重跑同一個指令會從目前的狀態接著做）。
 """
+import os
 import sys
 import shutil
 import hashlib
@@ -84,6 +89,8 @@ class Plan(object):
         self.notes = []
         self.ledger_seats = []  # blog-mirror 台帳要清掉的座號
         self.auth_keys = []     # 登入帳號要由老師在主控台刪掉的人（email 鍵）
+        self.exit_seats = []    # 記進退場台帳（data/ledgers/data-exit.jsonl）：還原時擋住這些人的舊資料
+        self.exit_aliases = []
 
     def firestore_count(self):
         return len(self.revoke) + len(self.updates) + len(self.deletes)
@@ -139,6 +146,14 @@ def reads_of(w, keys):
     return out
 
 
+def orphan_photos_of_seat(c, w, seat):
+    """這個座號部落格底下的孤兒照片（沒有文章、或不在文章 photos 清單裡；DATA-MODEL §1.6）：路徑清單。"""
+    base = "student_blogs/%s/entries" % seat
+    entries = {e.path: fsb.entry_pids(e.data.get("photos")) for e in c.list_docs(base, mask=["photos"])}
+    ex = w.walk(roots=[base], names_only=True)
+    return fsb.find_orphan_photos(entries, [r["path"] for r in ex.photos])
+
+
 def alias_of(c, key):
     """名單上的作者代號；名單已經撤了就查本機台帳 alias-history.jsonl（access_sync 移除人時會記）。"""
     d = c.get("allowlist/" + key)
@@ -181,6 +196,9 @@ def plan_seat(c, w, seat, teacher_key, tree, delete_comments):
                 if c.get("%s/%s" % (coll, d.id), mask=["__name__"]) is not None:
                     p.revoke.append("%s/%s" % (coll, d.id))
     p.deletes += expand(w, "student_blogs/" + seat)
+    orphans = orphan_photos_of_seat(c, w, seat)
+    if orphans:
+        p.notes.append("其中孤兒照片 %d 份（部落格文章沒列到的照片文件，已算在要刪的部落格裡）" % len(orphans))
     for coll in ("parent_photo_display", "personal_photos"):
         p.deletes += expand(w, "%s/%s" % (coll, seat))
     ros = c.get("roster/students")
@@ -216,6 +234,8 @@ def plan_seat(c, w, seat, teacher_key, tree, delete_comments):
                 except ValueError:
                     pass
     p.ledger_seats.append(seat)
+    p.exit_seats = [seat]
+    p.exit_aliases = sorted(aliases)
     if tree.root is not None:
         for q in (tree.path("blog_archive", seat), tree.path("cases", seat)):
             if q is not None and q.exists():
@@ -237,10 +257,21 @@ def plan_parent(c, w, key, teacher_key):
     alias = alias_of(c, key)
     if not alias:
         p.notes.append("查不到這位家長的作者代號（名單上沒有、本機台帳也沒有）：他的留言與部落格文章找不出來，只能撤名單與回條")
+    pcm = c.get("parent_child_map/" + key)
     for coll in ("allowlist", "private_allowlist", "parent_child_map"):
         if c.get("%s/%s" % (coll, key), mask=["__name__"]) is not None:
             p.revoke.append("%s/%s" % (coll, key))
     aliases = {alias} if alias else set()
+    p.exit_aliases = sorted(aliases)
+    # 孤兒照片不記作者，只知道在哪個座號底下：他（家長）對應的座號底下的孤兒照片一起刪（網頁上本來就看不到）
+    if pcm is not None and pcm.data.get("kind") == "parent":
+        for seat in pcm.data.get("seats") or []:
+            orphans = orphan_photos_of_seat(c, w, seat)
+            if orphans:
+                p.deletes += orphans
+                p.notes.append("座號 %s 底下的孤兒照片 %d 份一起刪（部落格文章沒列到的照片文件）" % (seat, len(orphans)))
+    elif pcm is None:
+        p.notes.append("名單上已經查不到他對應的座號：孤兒照片（如果有）這次不會一起刪，跑 backup.py firestore 看還有沒有")
     for path, _ in comments_by(w, aliases):
         p.deletes.append(path)
     p.deletes += reads_of(w, [key])
@@ -411,7 +442,52 @@ def write_auth_file(p, tag, known):
     return f, missing
 
 
+def remove_path(q):
+    """刪一個資料夾（連裡面全部）或一個檔：逐項刪、每一項各自 try，最後讀回確認真的不在了。
+    回刪不掉的項目清單（空＝刪乾淨）。雲端硬碟程式鎖著檔案時（Windows 常見）會刪到一半——不能當成刪好了。"""
+    q = Path(q)
+    left = []
+    if q.is_dir() and not q.is_symlink():
+        for dirpath, dirnames, filenames in os.walk(str(q), topdown=False):
+            for f in filenames:
+                try:
+                    os.unlink(os.path.join(dirpath, f))
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    left.append(os.path.join(dirpath, f))
+            for d in dirnames:
+                full = os.path.join(dirpath, d)
+                try:
+                    if os.path.islink(full):
+                        os.unlink(full)
+                    else:
+                        os.rmdir(full)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    if not any(x.startswith(full + os.sep) for x in left):
+                        left.append(full)
+        try:
+            os.rmdir(str(q))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    else:
+        try:
+            q.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            left.append(str(q))
+    if (q.exists() or q.is_symlink()) and not left:
+        left.append(str(q))
+    return left
+
+
 def execute(c, p, pool_dirs):
+    """回 (照片池刪掉的檔數, 刪不掉的本機／同步夾項目)。"""
     writes = [c.delete_write(x) for x in p.revoke]
     if writes:
         c.commit_all(writes, what="撤權限")
@@ -427,23 +503,24 @@ def execute(c, p, pool_dirs):
     if writes:
         c.commit_all(writes, what="刪資料")
     gone = fsb.purge_pool_paths(pool_dirs, p.deletes)
+    failed = []
     for q in p.local:
         try:
             move_to_trash(q, None)
         except OSError:
-            if Path(q).is_dir():
-                shutil.rmtree(str(q), ignore_errors=True)
-            else:
-                Path(q).unlink(missing_ok=True)
+            failed += remove_path(q)
+        else:
+            if Path(q).exists():
+                failed.append(str(q))
     for q in p.sync:
-        shutil.rmtree(str(q), ignore_errors=True)
+        failed += remove_path(q)
     if p.ledger_seats:
         f = paths.data_dir() / "ledgers" / "blog-mirror.json"
         led = read_json(f, default={})
         if isinstance(led, dict):
             led = {k: v for k, v in led.items() if k.split("/")[0] not in p.ledger_seats}
             write_json_atomic(f, led)
-    return gone
+    return gone, failed
 
 
 def main(argv=None):
@@ -561,8 +638,11 @@ def main(argv=None):
         if a.cmd == "year-end":
             # 先立旗標再撤權限：就算下面做到一半停了，名單同步也不會把上一屆的名單加回去（access_sync.py 看這支旗標）
             ledgers.mark_year_end(a.mode)
+        # 先記退場台帳再動手：做到一半停了，整庫還原也已經會擋住這些人的舊資料（backup.py restore 看這份）
+        ledgers.record_exit(a.cmd, seats=plan.exit_seats, keys=plan.auth_keys, aliases=plan.exit_aliases,
+                            mode=getattr(a, "mode", None))
         with RunLock(data / "backups" / ".lock"):
-            gone = execute(c, plan, pool_dirs)
+            gone, failed = execute(c, plan, pool_dirs)
     except (fr.FirestoreError, gauth.AuthError) as e:
         print(e.plain())
         print("  → 做到一半停下來也沒關係：修好後再跑同一個指令，會從目前的狀態接著做"
@@ -570,6 +650,23 @@ def main(argv=None):
         return 1
     except (Stop, LockBusy, OSError) as e:
         print("✗ %s" % e)
+        return 1
+    if failed:
+        root = paths.root()
+
+        def shown(x):
+            try:
+                return Path(x).relative_to(root).as_posix()
+            except ValueError:
+                return str(x)
+        print("✗ 網站資料庫已經撤權限 %d 份、改 %d 份、刪 %d 份，但這台電腦或雲端硬碟同步夾有 %d 個項目刪不掉（還在）："
+              % (len(plan.revoke), len(plan.updates), len(plan.deletes), len(failed)))
+        for x in failed[:20]:
+            print("    %s" % shown(x))
+        if len(failed) > 20:
+            print("    …還有 %d 個" % (len(failed) - 20))
+        print("  → 多半是雲端硬碟程式或別的程式正開著這些檔：請老師關掉開著的檔案、等雲端硬碟同步完（或暫停同步），"
+              "再跑同一個指令（會從目前的狀態接著做）。還是刪不掉，請老師自己在 Finder／檔案總管刪。")
         return 1
     print("✓ 完成：撤權限 %d 份、改 %d 份、刪 %d 份；照片備份池刪 %d 個檔；這台電腦刪 %d 個資料夾、同步夾刪 %d 個資料夾"
           "（雲端硬碟的垃圾桶會保留 30 天）。" % (len(plan.revoke), len(plan.updates), len(plan.deletes), gone,

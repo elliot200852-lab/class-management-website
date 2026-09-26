@@ -457,27 +457,68 @@ def select_paths(paths_, only=()):
     return [p for p in paths_ if any(p == o or p.startswith(o + "/") for o in pre)]
 
 
-def restore_writes(client, snap_docs, snap_photos, pool, current_docs, current_photos, only=()):
+LIST_COLLECTIONS = frozenset(("allowlist", "private_allowlist", "parent_child_map"))
+VIS_FIELDS = ("visible", "status")
+
+
+def is_list_path(path):
+    """名單類文件（誰進得了網站）：還原預設不寫，名單一律由 access_sync.py 照本機名單檔對帳。"""
+    return str(path).split("/", 1)[0] in LIST_COLLECTIONS
+
+
+def is_hidden(fields):
+    """原始欄位（REST 格式）：下架（visible:false）或收起（status:'hidden'）。"""
+    f = fields or {}
+    return f.get("visible") == {"booleanValue": False} or f.get("status") == {"stringValue": "hidden"}
+
+
+def keep_visibility(snap_fields, cur_fields):
+    """覆蓋既有文件時，visible／status 留現在的值（快照之後才下架、收起的，還原不會自動重新上架）。"""
+    out = dict(snap_fields or {})
+    for f in VIS_FIELDS:
+        if f in (cur_fields or {}):
+            out[f] = cur_fields[f]
+    return out
+
+
+def restore_writes(client, snap_docs, snap_photos, pool, current_docs, current_photos, only=(),
+                   include_lists=False, restore_visibility=False):
     """算出還原要寫哪些文件：只寫「現在不在」或「內容不同」的；**不刪任何文件**（快照之後新增的保留原樣）。
-    回 (寫入清單, {'create': [...], 'overwrite': [...], 'same': n})。寫入順序：深的先（照片、正文、留言），
+    名單類（LIST_COLLECTIONS）預設不寫（include_lists 才寫）；覆蓋既有文件時 visible／status 留現在的值
+    （restore_visibility 才照快照）。
+    回 (寫入清單, {'create', 'overwrite', 'same', 'lists'（沒寫的名單類）, 'kept_hidden'（留著下架的）,
+    'revealed'（會重新變可見的）})。寫入順序：深的先（照片、正文、留言），
     摘要文件最後（跟發文一樣：列表上看得到的時候，底下的東西一定都在）。"""
     snap = {d["path"]: d["fields"] for d in snap_docs}
     snap_ph = {r["path"]: r["key"] for r in snap_photos}
     cur = {d["path"]: d["fields"] for d in current_docs}
     cur_ph = {r["path"]: r["key"] for r in current_photos}
     chosen = set(select_paths(list(snap) + list(snap_ph), only))
+    lists = sorted(p for p in chosen if is_list_path(p))
+    if not include_lists:
+        chosen -= set(lists)
+        skipped_lists = lists
+    else:
+        skipped_lists = []
     create, overwrite, same = [], [], 0
+    kept_hidden, revealed = [], []
     fields_of = {}
     for p in chosen:
         if p in snap:
+            want = snap[p]
+            if p in cur:
+                if not restore_visibility:
+                    want = keep_visibility(snap[p], cur[p])
+                if is_hidden(cur[p]) and not is_hidden(snap[p]):
+                    (revealed if restore_visibility else kept_hidden).append(p)
             if p not in cur and p not in cur_ph:
                 create.append(p)
-            elif cur.get(p) != snap[p]:
+            elif cur.get(p) != want:
                 overwrite.append(p)
             else:
                 same += 1
                 continue
-            fields_of[p] = snap[p]
+            fields_of[p] = want
         else:
             key = snap_ph[p]
             if p in cur_ph and cur_ph[p] == key:
@@ -498,7 +539,137 @@ def restore_writes(client, snap_docs, snap_photos, pool, current_docs, current_p
             fields_of[p] = doc.get("fields", {}) or {}
     order = sorted(fields_of, key=lambda p: (-p.count("/"), p))
     writes = [{"update": {"name": client.name(p), "fields": fields_of[p]}} for p in order]
-    return writes, {"create": sorted(create), "overwrite": sorted(overwrite), "same": same}
+    return writes, {"create": sorted(create), "overwrite": sorted(overwrite), "same": same, "lists": skipped_lists,
+                    "kept_hidden": sorted(kept_hidden), "revealed": sorted(revealed)}
+
+
+EXIT_SEAT_OWNERS = ("student_blogs", "parent_photo_display", "personal_photos")
+
+
+def _seat_in_fields(path, fields):
+    """名冊、座位表這兩種「一份文件放全班」的文件裡有沒有列到某些座號：回列到的座號集合。"""
+    segs = path.split("/")
+    d = fr.decode_fields(fields or {})
+    found = set()
+    if path == "roster/students":
+        found = {str((s or {}).get("seat")) for s in d.get("students") or [] if isinstance(s, dict)}
+    elif segs[0] == "seating" and len(segs) == 2:
+        for r in d.get("rows") or []:
+            if isinstance(r, dict):
+                found |= {str(s) for s in r.get("seats") or []}
+    return found
+
+
+def exit_hits(snap_docs, snap_photos, chosen, exits):
+    """快照裡、這次選中要還原的路徑，有哪些屬於已退場的人（ledgers.read_exits() 的紀錄，呼叫端先挑出比快照晚的）：
+    座號（部落格、個人照、家長合照、通知佇列、名冊與座位表裡的那一格）、email 鍵（路徑裡的 reads/{key}、名單、
+    sent/{hash}）、作者代號（留言、部落格文章與對話的 authorAlias）。year-end 紀錄＝全部都算。回排序好的路徑清單。"""
+    chosen = set(chosen)
+    if not exits or not chosen:
+        return []
+    if any(e.get("kind") == "year-end" for e in exits):
+        return sorted(chosen)
+    from .ledgers import exit_hash
+    seats = set()
+    keys, aliases = set(), set()
+    for e in exits:
+        seats |= set(e.get("seats") or [])
+        keys |= set(e.get("keyHashes") or [])
+        aliases |= set(e.get("aliasHashes") or [])
+    hits = set()
+    fields = {d["path"]: d.get("fields") or {} for d in snap_docs if d["path"] in chosen}
+    # 全部快照文件（不只這次選中的）：作者代號屬於退場的人的文件路徑。文章底下的照片（thumbs／images）、
+    # 對話串本身不帶作者代號，要靠「祖先文件是他寫的」才認得出來（--only 只挑照片子路徑也一樣擋）。
+    owned = set()
+    if aliases:
+        for d in snap_docs:
+            alias = ((d.get("fields") or {}).get("authorAlias") or {}).get("stringValue")
+            if alias and exit_hash(alias) in aliases:
+                owned.add(d["path"])
+
+    def by_exited_author(path):
+        segs = path.split("/")
+        return any("/".join(segs[:i]) in owned for i in range(2, len(segs) + 1, 2))
+    for p in chosen:
+        segs = p.split("/")
+        if len(segs) >= 2 and segs[0] in EXIT_SEAT_OWNERS and segs[1] in seats:
+            hits.add(p)
+        elif len(segs) >= 2 and segs[0] == "blog_notify_queue" and segs[1].split("__", 1)[0] in seats:
+            hits.add(p)
+        elif keys and any(s in keys or exit_hash(s) in keys for s in segs[1::2]):
+            hits.add(p)
+        elif owned and by_exited_author(p):
+            hits.add(p)
+        elif p in fields and seats and (_seat_in_fields(p, fields[p]) & seats):
+            hits.add(p)
+    return sorted(hits)
+
+
+# ── 孤兒照片（部落格文章底下、文章 photos 清單沒列到的照片文件）──────────────────────
+# 規則為了存取次數預算，照片寫入不檢查「同一批真的有那篇文章」（DATA-MODEL §1.6）：家長可以在自己座號底下
+# 寫出沒有文章、或文章 photos 清單沒列到的照片文件。網頁上看不到，只佔容量；正常使用（整批一次成功或一次失敗）
+# 不會產生，所以出現了多半是有人繞過網頁直接寫。
+
+def blog_photo_owner(path):
+    """student_blogs/{seat}/entries/{postId}/{thumbs|images}/{pid} → (座號, postId, 文章路徑, pid)；不是就 None。"""
+    segs = str(path).split("/")
+    if len(segs) == 6 and segs[0] == "student_blogs" and segs[2] == "entries" and segs[4] in PHOTO_COLLECTIONS:
+        return segs[1], segs[3], "/".join(segs[:4]), segs[5]
+    return None
+
+
+def entry_pids(photos):
+    """文章的 photos 欄位（已解碼的 list）→ 列到的 pid 集合。"""
+    return {str((ph or {}).get("pid")) for ph in (photos or []) if isinstance(ph, dict) and ph.get("pid") is not None}
+
+
+def find_orphan_photos(entries, photo_paths):
+    """entries＝{文章路徑: 列到的 pid 集合}（只放真的存在的文章）；photo_paths＝照片文件路徑。
+    回孤兒照片路徑（排序好）：文章不存在，或 pid 不在文章的 photos 清單裡。"""
+    out = []
+    for p in photo_paths:
+        o = blog_photo_owner(p)
+        if o is None:
+            continue
+        _, _, entry, pid = o
+        if entry not in entries or pid not in entries[entry]:
+            out.append(p)
+    return sorted(out)
+
+
+def entries_from_docs(docs):
+    """快照或匯出的文件（原始欄位）→ find_orphan_photos 要的 {文章路徑: pid 集合}。"""
+    out = {}
+    for d in docs:
+        segs = d["path"].split("/")
+        if len(segs) == 4 and segs[0] == "student_blogs" and segs[2] == "entries":
+            out[d["path"]] = entry_pids(fr.decode_fields(d.get("fields") or {}).get("photos"))
+    return out
+
+
+def mask_post_id(post_id):
+    """印給人看的 postId：日期留著，後面的隨機碼只留第一個字。"""
+    s = str(post_id)
+    return s[:12] + "***" if len(s) > 12 else s
+
+
+def orphan_summary(orphans, size_of=None):
+    """孤兒照片統計（只有座號、數量、估算大小、遮住的 postId；不含內容）：
+    {"count", "bytes", "seats": {座號: {"count", "bytes", "posts": [遮住的 postId…（最多 3 個）]}}}。
+    size_of(路徑) → 位元組數或 None（例如照片池裡那個檔的大小）。"""
+    seats = {}
+    total = 0
+    for p in orphans:
+        seat, post_id, _, _ = blog_photo_owner(p)
+        n = (size_of(p) if size_of else None) or 0
+        s = seats.setdefault(seat, {"count": 0, "bytes": 0, "posts": []})
+        s["count"] += 1
+        s["bytes"] += n
+        total += n
+        m = mask_post_id(post_id)
+        if m not in s["posts"] and len(s["posts"]) < 3:
+            s["posts"].append(m)
+    return {"count": len(orphans), "bytes": total, "seats": seats}
 
 
 def purge_pool_paths(pool_dirs, doc_paths):

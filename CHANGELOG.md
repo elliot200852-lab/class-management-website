@@ -2,6 +2,46 @@
 
 本專案版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)（開發中的版本號帶 `-dev` 後綴）。
 
+## [0.1.1] - 2026-09-26
+
+結案後第一次完整審查（兩支獨立審查者：計畫書對照 repo、對抗式程式碼審查）抓到的問題。規則與前端本體沒有越權讀取；
+以下修的是規則之外的信任假設、還原語意、配額與文件。
+
+### 安全與權限
+
+- **信箱連結登入改成唯讀**：Firebase 的信箱連結登入與密碼登入在 token 裡都是 `password`，規則分不出來；
+  而開「電子郵件/密碼」provider 等於開放任何人用還沒登入過的家長信箱預先註冊、再誘使家長點驗證信。
+  現在私密紀事、留言、已讀回條、「我的孩子」全部要求 Google 登入；信箱連結只能看公開紀事與相簿，畫面會說明。
+  安裝步驟把信箱連結改成選用並寫明風險；`doctor.py --cloud` 沒開信箱連結不再算失敗（開了密碼卻沒開連結才算）。
+- **整庫還原不再復活已撤的權限與已下架的內容**：`backup.py restore firestore` 預設不寫 `allowlist`、`private_allowlist`、
+  `parent_child_map`（名單改跑 `access_sync.py`；整庫清空要重建作者代號才加 `--include-lists`）；快照早於資料退場或學年封存、
+  又碰到那些人的資料就停（`--include-exited` 才放行）；覆蓋既有文件時保留現在的 `visible`／`status`（`--restore-visibility` 才蓋回）。
+  新增退場台帳 `data/ledgers/data-exit.jsonl`（只存座號與雜湊）。
+- 共用電腦：登入畫面加「這是共用電腦」（只保留到關掉分頁、不留本機快取）；導師帳號一律只保留到關掉分頁；
+  快取裡的照片只在主文件從伺服器讀成功後才顯示。
+- 部落格文章的 `date` 綁 postId 前 10 碼；留言卡顯示作者代號前 4 碼，同名署名分得出來；前端判定 Google 登入改讀
+  token 的 `sign_in_provider`，與規則同源。
+- Hosting 加 `Content-Security-Policy: frame-ancestors 'self'` 與 `X-Frame-Options: SAMEORIGIN`。
+
+### 配額與對帳
+
+- `backup.py firestore` 備份完對帳孤兒照片（沒有文章、或不在文章清單裡的 `thumbs`／`images`），統計進 `status.py`；
+  `data_exit.py parent` 一併刪掉該座號的孤兒照片；DATA-MODEL §1.6 改成實況，`playbooks/data-exit.md` 補「單一帳號灌滿配額」的處置。
+- `data_exit.py` 刪同步夾不再 `ignore_errors`：逐項刪、讀回確認，刪不掉的列出來並 exit 1。
+
+### CI 與代理
+
+- workflow 最小權限（`contents: read`；Pages 寫入只給 deploy job）；`setup-chrome` 釘 commit SHA；
+  官方 actions 升到目前主版本；`ubuntu-latest` 改 `ubuntu-24.04`。
+- 三處代理禁讀清單補 `data/records/**`、`data/ledgers/alias-history.jsonl`；`.claude/settings.json` 另擋常見終端機讀檔指令；
+  AGENTS 鐵則 5 改寫成「盡力而為的防呆，不是安全邊界」。
+
+### 文件
+
+- DATA-MODEL 權限表把「未登入」與「登入但不在名單」分成兩欄；§5.1 寫明信箱連結每日 5 封可被外人耗盡、App Check 尚未內建；
+  §7 刪 Auth 帳號定案為主控台手動。ARCHITECTURE 拿掉施工期的 P1／P4 標記，§3.4／§8.5 記錄快取模式的取捨。
+  `data-template/students-named/README.md` 與總表一致（`parent-roles.yaml` 不含真名）。
+
 ## [0.1.0] - 2026-09-26
 
 第一個公開版本。以下依開發順序記錄；v1 核心、v1.1 選配與安裝說明全部包含在內。

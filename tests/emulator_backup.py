@@ -203,9 +203,11 @@ def run(R, c, root, fx, host, photos=True, verbose=False):
     R.check("模擬器清空了", not c.list_docs("posts"))
     rc, out = sh("backup.py", "restore", "firestore", "--snapshot", sid)
     R.check("還原預覽 exit 0、不寫", rc == 0 and "會新建" in out and not c.list_docs("posts"), out[-400:])
-    R.check("還原預覽不印完整 email", fx.parent_mail(0) not in out and "***@" in out)
-    rc, out = sh("backup.py", "restore", "firestore", "--snapshot", sid, "--apply")
-    R.check("還原 --apply exit 0（讀回逐欄比對一致）", rc == 0 and "讀回逐欄比對一致" in out, out[-500:])
+    R.check("還原預覽不印完整 email", not any(fx.parent_mail(i) in out for i in range(25)) and fx.TEACHER not in out)
+    R.check("還原預覽：名單類預設不還原、指向 access_sync.py", "名單類" in out and "access_sync.py" in out, out[-400:])
+    # 整個資料庫被清空的災難還原：連名單一起照快照寫回（作者代號才對得上舊留言），寫完再用 access_sync 對帳
+    rc, out = sh("backup.py", "restore", "firestore", "--snapshot", sid, "--apply", "--include-lists")
+    R.check("還原 --apply --include-lists exit 0（讀回逐欄比對一致）", rc == 0 and "讀回逐欄比對一致" in out, out[-500:])
     after, phantoms_after = raw_state()
     diff = sorted(set(before) ^ set(after)) + sorted(p for p in before if p in after and before[p] != after[p])
     R.check("還原後每一份文件、每一個欄位（含型別）都跟備份前一模一樣（%d 份）" % len(before), not diff,
@@ -287,6 +289,12 @@ def run(R, c, root, fx, host, photos=True, verbose=False):
             and trash_dir is not None and trash_dir.is_dir() and any(trash_dir.iterdir()),
             "垃圾桶：%s" % trash_dir)
     R.check("同步夾 學生個別資料/03、04_部落格歸檔/03 刪了", not cases03.exists() and not tree.path("blog_archive", "03").exists())
+    led = root / "data" / "ledgers" / "data-exit.jsonl"
+    R.check("退場台帳記了一筆（座號 03；信箱只存雜湊）", led.is_file() and '"03"' in led.read_text(encoding="utf-8")
+            and fx.parent_mail(2) not in led.read_text(encoding="utf-8"))
+    rc, out = sh("backup.py", "restore", "firestore", "--snapshot", sid)
+    R.check("轉出之後：拿退場前的快照整庫還原 → 停下（exit 2），不會把 03 的部落格寫回去",
+            rc == 2 and "已經退場" in out and c.get("student_blogs/03") is None, out[-400:])
     R.check("照片池裡座號 03 的照片也刪了", not any(p.name[:32] == fsb.pool_prefix(
         "student_blogs/03/entries/2026-10-06-parentc1/images/0") for p in tree.path("fs_photos").iterdir()))
     R.check("其他座號的部落格沒動", c.get("student_blogs/01") is not None and c.get(teacher_entry) is not None)

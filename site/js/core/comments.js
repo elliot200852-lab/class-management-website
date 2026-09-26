@@ -4,6 +4,8 @@
    · 寫：store.add(串/comments)，欄位只放 authorName、body、role、authorAlias、status、createdAt、replyTo；
      role 與 authorAlias 由規則強制等於名單上的值，這裡只是照 Session 帶上去。
    · 署名是本人自填的，可以亂寫；旁邊固定畫「導師／家長／同仁」標籤，標籤假冒不了。
+     再畫作者代號的前 4 碼（authorAlias 由規則綁名單）：兩則署名一樣、代號不一樣＝不是同一個帳號寫的。
+   · email 連結登入的讀者只能讀（規則不准留言，DATA-MODEL §1.1）：表單停用並說明要改用 Google 登入。
    · 導師可以把任何一則收起（hidden）或還原。留言一律當純文字畫（CMW.text）。 */
 (function (g) {
   'use strict';
@@ -18,6 +20,14 @@
 
   function roleTag(role) {
     return el('span', 'role-tag role-tag--' + (ROLE_LABEL[role] ? role : 'unknown'), ROLE_LABEL[role] || '？');
+  }
+
+  /** 作者代號短碼（前 4 碼）；代號格式不對就不畫 */
+  function aliasTag(alias) {
+    if (typeof alias !== 'string' || !/^[a-z0-9]{12}$/.test(alias)) return null;
+    var t = el('span', 'comment-alias', '#' + alias.slice(0, 4));
+    t.setAttribute('title', '帳號代號：同一個帳號留言，這 4 碼都一樣。署名是本人自己填的，看不出是誰時以代號為準。');
+    return t;
   }
 
   /** 依 replyTo 排成「主留言＋底下的回覆」，時間由舊到新 */
@@ -42,6 +52,7 @@
     opts = opts || {};
     var session = ctx.session;
     var teacher = session.roles.teacher;
+    var readOnly = C.readOnlyLogin(session);
     var sec = el('section', 'comments');
     sec.setAttribute('aria-labelledby', 'comments-title');
     var h = el('h2', 'comments-title', '留言');
@@ -63,6 +74,8 @@
       var head = el('header', 'comment-head');
       head.appendChild(el('strong', 'comment-name', x.authorName || '（沒有署名）'));
       head.appendChild(roleTag(x.role));
+      var at = aliasTag(x.authorAlias);
+      if (at) head.appendChild(at);
       if (session.roles.alias && x.authorAlias === session.roles.alias) head.appendChild(el('span', 'comment-mine', '我'));
       var t = el('time', 'comment-time', C.util.fmtTime(x.createdAt));
       head.appendChild(t);
@@ -72,7 +85,7 @@
       item.appendChild(body);
       if (x.status === 'hidden') item.appendChild(el('p', 'comment-hidden-note', '已收起：只有導師看得到這則留言。'));
       var actions = el('div', 'comment-actions');
-      if (!isReply && x.status !== 'hidden') {
+      if (!isReply && x.status !== 'hidden' && !readOnly) {
         actions.appendChild(C.dom.button('btn-link', '回覆', function () {
           replyTo = { id: d.id, name: x.authorName || '' };
           formParts.showReply();
@@ -166,7 +179,12 @@
       var msg = el('p', 'form-msg');
       msg.setAttribute('aria-live', 'polite');
       C.dom.add(f, replyBar, nameLabel, name, bodyLabel, body, counter, submit, msg);
-      if (!session.roles.kind || !session.roles.alias) {
+      if (readOnly) {
+        submit.disabled = true;
+        name.disabled = true;
+        body.disabled = true;
+        msg.textContent = C.READ_ONLY_LOGIN_MSG;
+      } else if (!session.roles.kind || !session.roles.alias) {
         submit.disabled = true;
         msg.textContent = '這個帳號的名單資料還沒準備好，暫時不能留言。';
       }
@@ -214,5 +232,5 @@
     return sec;
   }
 
-  C.comments = { mount: mount, roleTag: roleTag, ROLE_LABEL: ROLE_LABEL, threadify: threadify };
+  C.comments = { mount: mount, roleTag: roleTag, aliasTag: aliasTag, ROLE_LABEL: ROLE_LABEL, threadify: threadify };
 })(typeof window !== 'undefined' ? window : globalThis);

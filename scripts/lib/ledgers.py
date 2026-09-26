@@ -104,6 +104,51 @@ def clear_year_end():
         write_json_atomic(year_end_path(), st)
 
 
+# ── 資料退場台帳（data_exit.py --apply 寫；backup.py restore firestore 看）──────────────
+# 整庫還原會把退場前的快照寫回去：轉出學生的部落格、家長的留言與回條都會「復活」。所以退場時記一筆：
+# 誰（座號；email 鍵與作者代號只存 SHA-256 前 32 碼，不存信箱）、什麼時候。還原時比快照的建立時間，
+# 快照比退場早、又碰到這些人的資料，就停下來（除非老師明講 --include-exited）。只增不改。
+
+def exit_ledger_path():
+    return paths.data_dir() / "ledgers" / "data-exit.jsonl"
+
+
+def exit_hash(s):
+    """跟通知信台帳 blog_notify_queue/*/sent/{hash} 同一種算法：SHA-256 前 32 碼。"""
+    import hashlib
+    return hashlib.sha256(str(s).encode("utf-8")).hexdigest()[:32]
+
+
+def record_exit(kind, seats=(), keys=(), aliases=(), mode=None, path=None):
+    rec = {"at": now_iso(), "kind": str(kind), "seats": sorted(set(seats)),
+           "keyHashes": sorted({exit_hash(k) for k in keys if k}),
+           "aliasHashes": sorted({exit_hash(a) for a in aliases if a})}
+    if mode:
+        rec["mode"] = str(mode)
+    p = Path(path or exit_ledger_path())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(p), "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+        f.flush()
+    return rec
+
+
+def read_exits(path=None):
+    """退場紀錄（壞掉的行略過）。"""
+    p = Path(path or exit_ledger_path())
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("at") and rec.get("kind"):
+            out.append(rec)
+    return out
+
+
 # ── 課堂檔案台帳 ─────────────────────────────────────────────────────────
 
 def media_ledger_path():

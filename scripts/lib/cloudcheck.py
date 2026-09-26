@@ -206,23 +206,25 @@ def eval_webapp(status, j, msg, cfg):
 
 
 def eval_auth(status, j, msg, g_status, g, g_msg, project_id):
-    label = "登入方式：Google 已開、電子郵件連結（不用密碼）已開、授權網域有網站網址"
+    label = "登入方式：Google 已開、授權網域有網站網址（電子郵件連結選用）"
     if status != 200 or not isinstance(j, dict):
         return Item("auth", label, False, "pre", "讀不到 Authentication 設定（HTTP %s）" % status,
                     _denied_hints(status, msg) + ["還沒開過 Authentication 的話：Firebase 主控台 → Authentication → 開始使用。"])
     hints = []
     email = ((j.get("signIn") or {}).get("email") or {})
-    if not email.get("enabled"):
-        hints.append("電子郵件登入沒開：Authentication → 登入方式 → 電子郵件／密碼 → 啟用，並打開「電子郵件連結（無密碼登入）」。")
-    elif email.get("passwordRequired", True):
-        hints.append("電子郵件登入要打開「電子郵件連結（無密碼登入）」（現在是要密碼的模式）。")
+    # 電子郵件連結是選用（AGENTS.md 步驟 2 第 5 題：老師可以決定不開）。沒開不算失敗；
+    # 開了「電子郵件/密碼」卻沒開連結才算：那等於只開放了密碼註冊（冒用風險，DATA-MODEL §1.1），連結的好處一個都沒拿到。
+    if email.get("enabled") and email.get("passwordRequired", True):
+        hints.append("電子郵件登入開了、但沒開「電子郵件連結（無密碼登入）」：這樣只開放了密碼註冊。"
+                     "要嘛打開連結，要嘛把「電子郵件/密碼」整個關掉。")
     domains = j.get("authorizedDomains") or []
     if "%s.firebaseapp.com" % project_id not in domains:
         hints.append("授權網域裡沒有 %s.firebaseapp.com：Authentication → 設定 → 授權網域 → 新增。" % project_id)
     if g_status != 200 or not isinstance(g, dict) or not g.get("enabled"):
         hints.append("Google 登入沒開：Authentication → 登入方式 → Google → 啟用（支援電子郵件選你自己的信箱）。")
     detail = "Google %s｜email 連結 %s" % ("開" if (g or {}).get("enabled") else "沒開",
-                                          "開" if email.get("enabled") and not email.get("passwordRequired", True) else "沒開")
+                                          "開" if email.get("enabled") and not email.get("passwordRequired", True)
+                                          else ("沒開（選用；沒有 Google 帳號的家長看 AGENTS.md）" if not email.get("enabled") else "沒開"))
     return Item("auth", label, not hints, "pre", detail, hints)
 
 

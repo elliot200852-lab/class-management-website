@@ -234,8 +234,15 @@ class TestDenyLists(unittest.TestCase):
                     if x.strip() and not x.strip().startswith("#")}
         self.assertEqual(from_claude, lines(".geminiignore"))
         self.assertEqual(from_claude, lines(".aiexclude"))
-        for must in ("data/roster.csv", "data/contacts.csv", "exports/**", "data/exports/**"):
+        for must in ("data/roster.csv", "data/contacts.csv", "exports/**", "data/exports/**", "data/records/**",
+                     "data/ledgers/alias-history.jsonl"):
             self.assertIn(must, from_claude)
+        # Read 的每一條都要有對應的終端機讀檔 deny（盡力而為的防呆：擋不住 python、type 之類，AGENTS.md 鐵則 5 照樣要守）
+        bash = {x for x in claude if x.startswith("Bash(")}
+        for p in from_claude:
+            stem = p[:-2] if p.endswith("/**") else p
+            for cmd in ("cat", "head", "tail", "sed", "grep"):
+                self.assertIn("Bash(%s *%s*)" % (cmd, stem), bash)
 
 
 if __name__ == "__main__":

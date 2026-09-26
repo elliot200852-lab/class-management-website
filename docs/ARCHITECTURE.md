@@ -176,6 +176,8 @@ CMW.getStore():
 ```
 Session    { state: 'loading'|'signed-out'|'denied'|'ready',
              user:  { uid, email, emailKey, provider: 'google.com'|'emailLink' } | null,
+                    // provider 讀 ID token 的 claims.firebase.sign_in_provider（與規則 isGoogle() 同源）；
+                    // 'emailLink'（token 是 'password'）的非導師只能讀公開內容：CMW.readOnlyLogin(session)
              roles: { teacher: bool, reader: bool, privateReader: bool,
                       kind: 'teacher'|'parent'|'staff'|null,     // allowlist.kind
                       alias: string|null,                       // allowlist.alias（認「我的留言」用）
@@ -198,9 +200,9 @@ CMW.SERVER_TIME                      // 寫入資料裡代表「伺服器時間�
 |---|---|---|---|---|
 | 1 | `onSession(cb)` | 取消訂閱函式 | Auth 狀態改變 → 平行讀 DATA-MODEL §1.2 那四份（`allowlist`、`private_allowlist`、`parent_child_map` 自己那份、`site_access/teacher` 探針；後兩個只在 Google 登入時發）→ 組 `Session` 回呼。結果暫存在 `sessionStorage`（同一分頁 30 分鐘內、uid 相同就不重讀） | 依目前示範角色組 Session |
 | 2 | `getSession()` | `Session` | 最近一次的 Session | 同左 |
-| 3 | `signInWithGoogle()` | — | `signInWithPopup`；被擋（`auth/popup-blocked` 等）退回 `signInWithRedirect`（同網域，§3.4） | 跳出角色選單（等同 `demoSetRole`） |
+| 3 | `signInWithGoogle()` | — | `signInWithPopup`；被擋（`auth/popup-blocked` 等）退回 `signInWithRedirect`（同網域，§3.4）。勾了「共用電腦」先 `setPersistence(browserSessionPersistence)` | 跳出角色選單（等同 `demoSetRole`） |
 | 4 | `sendSignInLink(email)` | — | `sendSignInLinkToEmail`，回到 `siteUrl + '/index.html'`；信箱暫存本機；`auth/quota-exceeded` → `StoreError('quota')`（Spark 每天 5 封，DATA-MODEL §5.1） | 不寄信，畫面顯示「示範模式不寄信」 |
-| 5 | `completeSignInLink(email?)` | bool | 網址是登入連結就完成登入；換裝置開信時本機沒有信箱 → `StoreError('invalid')`，畫面請他再輸入一次 | 回 `false` |
+| 5 | `completeSignInLink(email?)` | bool | 網址是登入連結就完成登入；換裝置開信時本機沒有信箱 → `StoreError('invalid')`，畫面請他再輸入一次。寄信時勾了「共用電腦」（localStorage 帶到新分頁）→ 先切成關掉分頁就登出 | 回 `false` |
 | 6 | `signOut()` | — | 登出 → 清 Session 暫存 → **清掉本機的 Firestore 快取**（`terminate` 後 `clearIndexedDbPersistence`，共用電腦上不留別人的資料）→ 重新載入 | 切成「未登入」 |
 
 **B. 通用讀取**
@@ -225,8 +227,8 @@ CMW.SERVER_TIME                      // 寫入資料裡代表「伺服器時間�
 
 | # | 方法 | 回傳 | 真站 | 示範 |
 |---|---|---|---|---|
-| 15 | `photoSrc(ownerPath, pid, size)` | data URL 字串或 `null` | `size` 是 `'thumb'`／`'image'`。照片文件不可變：先 `getDocFromCache`、沒有才 `getDoc`；驗 `data` 是 base64 字元集；回 `'data:image/jpeg;base64,' + data`（MIME 寫死）；同一頁內記住結果 | `demo-art.js` 依路徑畫剪影（SVG data URL） |
-| 16 | `markRead(threadPath)` | — | 導師不做事；否則 get 自己的回條（`reads/{自己的 emailKey}`），不存在才 `set({ kind, readAt: SERVER_TIME })`；兩個分頁同時建造成的被拒只在這裡吞掉（DATA-MODEL §2.8） | 不做事 |
+| 15 | `photoSrc(ownerPath, pid, size)` | data URL 字串或 `null` | `size` 是 `'thumb'`／`'image'`。照片文件不可變：先 `getDocFromCache`、沒有才 `getDoc`；**快取命中時，主人文件要在這一頁從伺服器讀成功過**（`get`／`query`／`watch` 收到 `fromCache == false` 的主人文件，或 `getDocFromServer` 問一次）才顯示，否則回 `null`（被撤權限、已下架的照片不從快取吐出來）；驗 `data` 是 base64 字元集；回 `'data:image/jpeg;base64,' + data`（MIME 寫死）；同一頁內記住結果 | `demo-art.js` 依路徑畫剪影（SVG data URL） |
+| 16 | `markRead(threadPath)` | — | 導師與 email 連結登入（規則不准簽）不做事；否則 get 自己的回條（`reads/{自己的 emailKey}`），不存在才 `set({ kind, readAt: SERVER_TIME })`；兩個分頁同時建造成的被拒只在這裡吞掉（DATA-MODEL §2.8） | 不做事 |
 | 17 | `newPostId(date?)` | string | `YYYY-MM-DD-` ＋ 8 碼小寫英數（`crypto.getRandomValues`）；**每次送出都叫一次，重試也是** | 同左 |
 
 **E. 示範模式專用**（`FirestoreStore` 上呼叫一律丟 `invalid`）
@@ -238,7 +240,8 @@ CMW.SERVER_TIME                      // 寫入資料裡代表「伺服器時間�
 | 20 | `demoReset()` | 清掉 localStorage 裡的示範寫入，回到初始資料 |
 
 **真站的 Firestore 初始化**：`initializeFirestore(app, { localCache: persistentLocalCache(...) })`，IndexedDB 不能用
-（私密視窗、被封鎖）就退回記憶體快取，畫面照常。模擬器模式呼叫 `connectAuthEmulator`、`connectFirestoreEmulator`。
+（私密視窗、被封鎖）就退回記憶體快取，畫面照常。這個分頁勾了「共用電腦」（`CMW.sharedDevice`，§3.4）就一開始用
+`memoryLocalCache()`、Auth 用 `browserSessionPersistence`。模擬器模式呼叫 `connectAuthEmulator`、`connectFirestoreEmulator`。
 
 ### 2.4 路徑與查詢名
 
@@ -414,22 +417,33 @@ Session 變成 `ready` 後依角色補上項目。
   - email 連結：寄信 → 回到 `index.html` 自動完成登入；換裝置開信要再輸入一次信箱。**Spark 每天全專案只能寄 5 封**，
     `auth/quota-exceeded` 照 §2.6 顯示；畫面文字說明「一台裝置只需要登入一次」。
 - **登入了但不在名單**（`Session.state == 'denied'`）：顯示目前登入的信箱＋請他把這個信箱告訴老師＋登出換帳號的按鈕。不顯示任何內容。
-- 登入狀態用 Firebase 預設的本機保存（關掉瀏覽器再開仍是登入的）。
+- **email 連結登入只能讀**（DATA-MODEL §1.1）：留言框停用、私密紀事與「我的孩子」顯示「此登入方式只能閱讀，留言與私密內容請用 Google 登入。」
+  （`CMW.readOnlyLogin(session)`），不靜默失敗；寄信那一段也先講。
+- **登入狀態與本機快取**：家長預設用 Firebase 的本機保存（關掉瀏覽器再開仍是登入的），資料庫快取放 IndexedDB。
+  - 登入閘有「這是共用電腦」勾選（記在這個分頁的 sessionStorage：`CMW.sharedDevice`）。勾了＝Auth `browserSessionPersistence`
+    （關掉分頁就登出）＋ Firestore `memoryLocalCache`（不寫進硬碟）。email 連結會開在新分頁，所以寄信時把勾選另外記在
+    localStorage，完成登入就刪。
+  - **導師的登入一律只保留到關掉分頁**：判定是導師（探針放行）就 `setPersistence(browserSessionPersistence)`（SDK 把已登入的帳號搬過去，
+    不必重新登入）。代價：導師每開一個新分頁都要重新登入。資料庫快取**不**跟著換成記憶體（要換得重新載入；而且模擬器冒煙測試裡
+    記憶體快取會間歇「連不到後端」，見 §8.5）：導師在共用電腦上要勾「這是共用電腦」，或用完按登出（會清 IndexedDB）。
+  - 已經登入、IndexedDB 還開著時才勾到共用（例如點登入信開在新分頁）→ 切成 session 保存、清快取、重新載入一次；
+    sessionStorage 不能用時不做（避免一直重新載入）。
+  - 按「登出」照舊清 IndexedDB（§2.3 第 6 個方法）。
 
-### 3.5 部署設定裡的標頭（`firebase.json`，P3 寫）
+### 3.5 部署設定裡的標頭（`firebase.json`）
 
 | 路徑 | 標頭 |
 |---|---|
-| 全部 | `X-Robots-Tag: noindex, nofollow`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin` |
+| 全部 | `X-Robots-Tag: noindex, nofollow`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`、`Content-Security-Policy: frame-ancestors 'self'`、`X-Frame-Options: SAMEORIGIN`（防別的網站用 iframe 嵌入班網做點擊劫持；舊瀏覽器看 X-Frame-Options。用 SAMEORIGIN 不用 DENY：`authDomain` 與網站同網域，Firebase Auth 的輔助 iframe 也在同網域） |
 | `js/site-config.js`、`js/core/queries.js` | `Cache-Control: no-cache`（改設定、加查詢後立刻生效） |
 | 其餘靜態檔 | 可快取 |
 
 **正式網址導向不寫在 `firebase.json`**：Firebase Hosting 的 `redirects` 只比對路徑、不能比對主機名稱，而 `<專案>.web.app` 與
 `<專案>.firebaseapp.com` 是同一個站，在設定檔裡寫導向會變成自己導向自己。導向由 `app.js` 做（§3.4）。
 
-建議再加 `Content-Security-Policy`（`script-src` 只放 `'self'` 與 Firebase SDK 的官方 CDN、`img-src 'self' data:`、
-`frame-src 'self'` 與 `https://www.youtube-nocookie.com`、`connect-src` 放 Firestore 與 Auth 的 API 網域）；
-**必須先在 §8.4 的冒煙測試跑過真的登入流程才開**，少放一個網域登入就會壞。
+**待補：完整的 `Content-Security-Policy`**（目前只有 `frame-ancestors`）：`script-src` 只放 `'self'` 與 Firebase SDK 的官方 CDN、
+`img-src 'self' data:`、`frame-src 'self'` 與 `https://www.youtube-nocookie.com`、`connect-src` 放 Firestore 與 Auth 的 API 網域；
+**必須先在 §8.4 的冒煙測試跑過真的登入流程才開**，少放一個網域登入就會壞。加的時候跟現有的 `frame-ancestors 'self'` 寫在同一個標頭裡。
 
 ---
 
@@ -482,7 +496,8 @@ Span = { text: string, b?: true, i?: true, href?: string }  text ≤ 5,000 字�
 ### 4.4 照片顯示
 
 - 來源一律 `'data:image/jpeg;base64,' + data`，**MIME 寫死**；`<img>` 不會執行內容，就算資料被塞了別的東西也只是破圖。
-- 照片文件不可變（DATA-MODEL §2.12）→ `photoSrc` 先查本機快取；相簿燈箱只在點開時才讀顯示圖，同時最多 4 張在讀。
+- 照片文件不可變（DATA-MODEL §2.12）→ `photoSrc` 先查本機快取（命中時要主人文件這一頁從伺服器讀成功過，§2.3 第 15 個方法）；
+  相簿燈箱只在點開時才讀顯示圖，同時最多 4 張在讀。
 - 列表卡片的封面直接用摘要文件裡的 `coverThumb`，不另外讀。
 - 相簿格用 `photos.thumbs` 一次 60 張往下捲（查詢結果本身就帶 `data`）。
 
@@ -631,7 +646,7 @@ Pillow 一行 pip 指令，Mac 與 Windows 都有官方預先編好的套件。`
 
 ## 7. 設定產生與部署
 
-### 7.1 `build_config.py`（已完成，P1）
+### 7.1 `build_config.py`
 
 | 去處 | 欄位 | 誰看得到 |
 |---|---|---|
@@ -649,12 +664,12 @@ Pillow 一行 pip 指令，Mac 與 Windows 都有官方預先編好的套件。`
   **一定要搭 `--root` 指到別的資料夾**：產生檔的位置就是正式網站的位置，寫進 repo 本身的話下一次部署會把「連本機模擬器」送上線，
   所以 `--root` 等於 repo 時直接 exit 1。正式建置的 `emulator` 永遠是 `false`（公開欄位 `EMULATOR`，只是一個布林值）。
 
-### 7.2 `build_indexes.py`（已完成，P1）
+### 7.2 `build_indexes.py`
 
 `templates/queries.json` → `firestore.indexes.json`（repo 根）＋`site/js/core/queries.js`，兩個都進 git。
 `--check` 只驗不寫（單元測試會跑），`--markdown` 印 DATA-MODEL §4.4 的表。規則與測試見 DATA-MODEL §4。
 
-### 7.3 部署順序（`scripts/deploy.py`，P4，順序寫死）
+### 7.3 部署順序（`scripts/deploy.py`，順序寫死）
 
 | 步驟 | 做什麼 | 為什麼在這個位置 |
 |---|---|---|
@@ -673,7 +688,7 @@ Pillow 一行 pip 指令，Mac 與 Windows 都有官方預先編好的套件。`
 - `firebase.json`：`firestore.rules`、`firestore.indexes` 指到產生檔；hosting 公開目錄 `site`、標頭照 §3.5；
   模擬器埠 auth 9099、firestore 8080、hosting 5000，`ui.enabled: false`。
 
-### 7.4 `doctor.py --cloud`：只有真雲端才會壞的項目，唯讀檢查清單（P4）
+### 7.4 `doctor.py --cloud`：只有真雲端才會壞的項目，唯讀檢查清單
 
 全部是**讀取**（REST GET，帶 `x-goog-user-project`），不改任何東西。「必要」項沒過，`deploy.py` 不動手。
 
@@ -768,7 +783,7 @@ Pillow 一行 pip 指令，Mac 與 Windows 都有官方預先編好的套件。`
   互動：留言、收起、燈箱、相簿、影片預覽框、家長發文（瀏覽器裡真的 canvas 重新編碼一張帶 EXIF 方向與 GPS 的 JPEG，
   驗輸出沒有 APP1、沒有 GPS、方向已轉正）、對話串與收起、導師未讀、同仁、非私密讀者；單一 HTML 的 `#/` 路由。
 
-### 8.4 模擬器＋真 Firebase JS SDK 冒煙（`python3 scripts/smoke_emulator.py`，P2b；補 §2.7「示範模式不模擬權限」留下的空缺）
+### 8.4 模擬器＋真 Firebase JS SDK 冒煙（`python3 scripts/smoke_emulator.py`；補 §2.7「示範模式不模擬權限」留下的空缺）
 
 示範模式不經過 SDK 也不經過規則，所以**另外要有一條走真 SDK、真規則、正式站模式的路徑**：
 
@@ -798,7 +813,10 @@ Pillow 一行 pip 指令，Mac 與 Windows 都有官方預先編好的套件。`
 
 §8.4 另外刻意沒有涵蓋、只有真雲端或真手機才知道的：真的 Google 帳號選擇畫面走完（模擬器只驗到「視窗開得出來」，
 登入本身用假憑證）、`signInWithRedirect` 退路走完回到網站、email 連結登入信（Spark 每天 5 封）、查詢的文件存取次數上限
-（正式環境 10、模擬器 20，只能靠 §8.2 的靜態檢查）、iPhone Safari 的 HEIC 與 `createImageBitmap` 轉正、Content-Security-Policy（§3.5）。
+（正式環境 10、模擬器 20，只能靠 §8.2 的靜態檢查）、iPhone Safari 的 HEIC 與 `createImageBitmap` 轉正、Content-Security-Policy（§3.5）、
+「這是共用電腦」的記憶體快取（`memoryLocalCache`，§3.4）：在模擬器＋無頭 Chrome 裡把整套冒煙改成記憶體快取跑，會間歇出現
+「Could not reach Cloud Firestore backend」而轉成離線（2026-09-26 實測，原本的 IndexedDB 快取全過），所以 §8.4 不涵蓋這條路徑，
+要在真雲端用真手機勾選登入驗一次。
 
 ---
 

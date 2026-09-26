@@ -13,6 +13,8 @@
               （05_全站備份/firestore/photos/）。保留最近 --keep 份（預設 30），只刪這個工具自己建的快照。
               讀取次數大約等於資料庫的文件數（一學年後約一兩萬次；免費方案每天 50,000 次）：
               建議傍晚以後跑，別跟「大家都在看新相簿」的那天撞在一起。
+              備份完順手對帳「孤兒照片」（部落格文章 photos 清單沒列到的照片文件）：只印座號、遮住的文章代號、
+              數量與估算大小，統計記進 backup-state.json（status.py 顯示）。
   records     data/ 裡的名冊、母本、課程單元、課程紀錄、台帳（backups/、inbox/、exports/ 以外的全部）
               打包成 zip → 同步夾 01_機密（只有導師）/紀錄備份/records-<日期時間>.zip ＋ records-latest.zip，
               保留 --keep 份。照片、影片、音檔與 20 MB 以上的大檔不進 zip，改成增量鏡像：
@@ -23,6 +25,10 @@
   restore firestore  從快照把資料庫寫回去。**預設只預覽**（列出會新建、會覆蓋哪些文件）；加 --apply 才寫，
               寫之前自動先做一份「還原前」的本機快照。只寫「現在沒有」或「內容不同」的文件，**不刪任何文件**
               （快照之後才有的留言、文章都保留）。--only <路徑> 只還原某一篇、某一本（例如 posts/2026-10-01-walk）。
+              三道預設的閘（DATA-MODEL §6）：①名單類（allowlist、private_allowlist、parent_child_map）不寫，名單改用
+              access_sync.py 照本機名單檔對帳（--include-lists 才寫）；②快照比資料退場或學年封存早、又碰到已退場的
+              座號／家長的資料 → 停下來（data/ledgers/data-exit.jsonl；--include-exited 才寫）；③覆蓋既有文件時
+              visible／status 留現在的值，快照之後才下架、收起的不會自動重新上架（--restore-visibility 才照快照）。
   restore records    從紀錄備份 zip 還原 data/（以及鏡像裡的照片與附件）。預設只預覽；--apply 才寫；
               已經存在的檔**不覆蓋**，除非加 --overwrite。
   list        列出本機與同步夾有哪些快照、紀錄備份（唯讀、不連網）。
@@ -183,10 +189,35 @@ def do_firestore(ctx, keep):
     if ex.phantoms:
         _say("  提醒：有 %d 個「本身已刪、底下還有資料」的空殼路徑（例如 %s），已照樣備份底下的資料。"
              % (len(ex.phantoms), fsb.mask_path(ex.phantoms[0])))
-    ledgers.mark_ok("firestore", snapshot=sid, documents=len(ex.docs), photos=len(rows), downloaded=fetched)
+    orphans = orphan_report(ex, rows, pool)
+    ledgers.mark_ok("firestore", snapshot=sid, documents=len(ex.docs), photos=len(rows), downloaded=fetched,
+                    orphans=orphans)
     heartbeat(ctx, "weekly", True)
     _say("✓ 資料庫備份完成（%s）。雲端硬碟程式會自己上傳；右上角（Windows 右下角）的雲端硬碟圖示顯示「已是最新狀態」才算傳完。" % sid)
     return ex, rows, pool
+
+
+def orphan_report(ex, rows, pool):
+    """備份完對帳：部落格文章底下、文章 photos 清單沒列到（或文章根本不在）的照片文件（DATA-MODEL §1.6）。
+    只印座號、遮住的 postId、數量、估算大小（照片池裡那個檔的大小），不印內容。回統計（寫進 backup-state，status.py 看）。"""
+    keys = {r["path"]: r["key"] for r in rows}
+
+    def size_of(path):
+        f = pool.find(keys[path]) if path in keys else None
+        try:
+            return f.stat().st_size if f is not None else None
+        except OSError:
+            return None
+    orphans = fsb.find_orphan_photos(fsb.entries_from_docs(ex.docs), [r["path"] for r in ex.photos])
+    summary = fsb.orphan_summary(orphans, size_of)
+    if orphans:
+        _say("  ！ 孤兒照片 %d 份、約 %s：學生部落格底下有照片文件沒掛在任何文章上（網頁上看不到，只佔免費方案的容量）。"
+             % (summary["count"], human_size(summary["bytes"])))
+        for seat in sorted(summary["seats"]):
+            x = summary["seats"][seat]
+            _say("      座號 %s：%d 份、約 %s（文章代號 %s）" % (seat, x["count"], human_size(x["bytes"]), "、".join(x["posts"])))
+        _say("    → 正常使用不會出現，多半是有人繞過網頁直接寫：照 playbooks/data-exit.md「孤兒照片」一節處理。")
+    return summary
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -409,6 +440,45 @@ def _print_paths(label, items, limit=20):
         _say("    …還有 %d 份（完整清單在上面寫出的計畫檔）" % (len(items) - limit))
 
 
+def _hidden_now(doc):
+    """batch_get 讀回的 Doc（已解碼）：現在是下架或收起。"""
+    return doc is not None and (doc.data.get("visible") is False or doc.data.get("status") == "hidden")
+
+
+def _snapshot_time(man):
+    t = ledgers.parse_iso(man.get("created"))
+    if t is None:
+        try:
+            t = datetime.datetime.strptime(str(man.get("id")), "%Y%m%d-%H%M%S").astimezone()
+        except ValueError:
+            return None
+    return t
+
+
+def exited_in_snapshot(man, docs, photos, chosen):
+    """快照比某次資料退場（或學年封存）還早、而且這次選中的路徑碰到那些人的資料 → (路徑清單, 原因)；沒有 → ([], "")。
+    同一秒的也算「比快照晚」（寧可多停一次）。快照沒有時間 → 所有退場紀錄都算。"""
+    t = _snapshot_time(man)
+
+    def later(at):
+        x = ledgers.parse_iso(at)
+        return t is None or x is None or x >= t
+    exits = [e for e in ledgers.read_exits() if later(e.get("at"))]
+    ye = ledgers.year_end_pending()
+    if ye and later(ye.get("at")) and not any(e.get("kind") == "year-end" for e in exits):
+        exits.append({"kind": "year-end", "at": ye.get("at")})
+    hits = fsb.exit_hits(docs, photos, chosen, exits)
+    if not hits:
+        return [], ""
+    kinds = []
+    for e in exits:
+        k = {"seat": "學生轉出（座號 %s）" % "、".join(e.get("seats") or []), "parent": "家長刪除資料",
+             "year-end": "學年封存"}.get(e.get("kind"), e.get("kind"))
+        if k not in kinds:
+            kinds.append(k)
+    return hits, "、".join(kinds)
+
+
 def do_restore_firestore(ctx, a):
     tree = ctx.tree
     snap_root = tree.path("fs_snapshots")
@@ -427,9 +497,28 @@ def do_restore_firestore(ctx, a):
         return EXIT_STOPPED
     pool = fsb.Pool(ctx.fs_base / "photos", sync_photos if (sync_photos and sync_photos.is_dir()) else None)
     chosen = set(fsb.select_paths([d["path"] for d in docs] + [r["path"] for r in photos], a.only or ()))
+    lists = sorted(p for p in chosen if fsb.is_list_path(p))
+    if not a.include_lists:
+        chosen -= set(lists)
+    if lists and not a.include_lists:
+        _say("  名單類（誰進得了網站）%d 份不還原（已排除）：名單一律照這台電腦的名單檔重新對帳，"
+             "要還原名單改跑 %s scripts/access_sync.py%s（先預覽）。" % (len(lists), PY, paths.rerun_flags(a)))
     if not chosen:
-        _say("✗ 快照 %s 裡沒有符合 --only 的文件。" % man.get("id"))
+        _say("✗ 快照 %s 裡沒有符合 --only 的文件（名單類不算）。" % man.get("id"))
         return EXIT_STOPPED
+    hits, why = exited_in_snapshot(man, docs, photos, chosen)
+    if hits and not a.include_exited:
+        _say("✗ 這份快照（%s）比%s還早，裡面有 %d 份是已經退場的資料；照原樣還原會讓它們回到網站上。先停下來。"
+             % (man.get("id"), why, len(hits)))
+        for p in hits[:10]:
+            _say("    %s" % fsb.mask_path(p))
+        if len(hits) > 10:
+            _say("    …還有 %d 份" % (len(hits) - 10))
+        _say("  → 只還原壞掉的那幾篇：加 --only <路徑>（例如 posts/2026-10-01-walk），避開上面這些。")
+        _say("  → 老師確認真的要連退場的資料一起寫回去，才加 --include-exited。")
+        return EXIT_STOPPED
+    if hits:
+        _say("  ！ 加了 --include-exited：%d 份已退場的資料會照快照寫回去（%s）。" % (len(hits), why))
     missing = [r["key"] for r in photos if r["path"] in chosen and pool.find(r["key"]) is None]
     if missing:
         _say("✗ 照片池少了 %d 份照片（本機與同步夾都沒有），還原不完整，先停下來。" % len(missing))
@@ -441,17 +530,27 @@ def do_restore_firestore(ctx, a):
         now = {}
         lst = sorted(chosen)
         for i in range(0, len(lst), 100):
-            now.update(c.batch_get(lst[i:i + 100], mask=["__name__"]))
+            now.update(c.batch_get(lst[i:i + 100], mask=list(fsb.VIS_FIELDS)))
         create = sorted(p for p in lst if now.get(p) is None)
         exist = sorted(p for p in lst if now.get(p) is not None)
+        snap_fields = {d["path"]: d["fields"] for d in docs}
+        flip = sorted(p for p in exist if p in snap_fields and _hidden_now(now[p]) and not fsb.is_hidden(snap_fields[p]))
         plan = ctx.data / "exports" / ("restore-plan-%s.txt" % fsb.snapshot_id())
         plan.parent.mkdir(parents=True, exist_ok=True)
-        plan.write_text("".join("新建 %s\n" % p for p in create) + "".join("可能覆蓋 %s\n" % p for p in exist),
+        plan.write_text("".join("新建 %s\n" % p for p in create) + "".join("可能覆蓋 %s\n" % p for p in exist)
+                        + "".join("%s %s\n" % ("會重新上架" if a.restore_visibility else "保留下架", p) for p in flip)
+                        + ("" if a.include_lists else "".join("不還原（名單類） %s\n" % p for p in lists)),
                         encoding="utf-8")
         _say("  快照裡選中的文件 %d 份：現在不在（會新建）%d 份、現在還在（內容不同才會覆蓋）%d 份。"
              % (len(lst), len(create), len(exist)))
         _print_paths("會新建", create)
         _print_paths("可能覆蓋", exist, limit=10)
+        if flip and a.restore_visibility:
+            _print_paths("現在是下架／收起、還原後會重新變可見（加了 --restore-visibility）", flip)
+        elif flip:
+            _print_paths("現在是下架／收起、快照裡是可見的——**保留下架**（要照快照重新上架才加 --restore-visibility）", flip)
+        if exist and not a.restore_visibility:
+            _say("  覆蓋既有文件時，「上架／下架」「留言收起」一律留現在的樣子。")
         _say("  完整清單：%s" % plan.relative_to(paths.root()).as_posix())
         _say("  快照之後才新增的文件**不會被刪**。真的要寫的時候會先自動做一份「還原前」快照。")
         _say("\n這只是預覽。老師說好之後再跑同一個指令加 --apply。")
@@ -466,7 +565,8 @@ def do_restore_firestore(ctx, a):
                 if (fsb.read_manifest(p) or {}).get("kind") == "pre-restore"]
         fsb.prune(pres, PRE_RESTORE_KEEP)
         _say("  還原前快照：data/backups/firestore/%s" % pre_id)
-        writes, summary = fsb.restore_writes(c, docs, photos, pool, ex.docs, rows, only=a.only or ())
+        writes, summary = fsb.restore_writes(c, docs, photos, pool, ex.docs, rows, only=a.only or (),
+                                             include_lists=a.include_lists, restore_visibility=a.restore_visibility)
         if not writes:
             _say("✓ 選中的 %d 份文件跟現在一模一樣，不用寫。" % summary["same"])
             return 0
@@ -483,6 +583,16 @@ def do_restore_firestore(ctx, a):
             return 1
         _say("✓ 已還原：新建 %d 份、覆蓋 %d 份（%d 次寫入批次），內容相同略過 %d 份；讀回逐欄比對一致。"
              % (len(summary["create"]), len(summary["overwrite"]), n, summary["same"]))
+        if summary["kept_hidden"]:
+            _say("  現在是下架／收起的 %d 份維持原狀（沒加 --restore-visibility）。" % len(summary["kept_hidden"]))
+        if summary["revealed"]:
+            _say("  ！ %d 份照快照重新變可見（加了 --restore-visibility）。" % len(summary["revealed"]))
+        if summary["lists"]:
+            _say("  名單類 %d 份沒有寫；要讓名單回到正確狀態，跑 %s scripts/access_sync.py%s 先預覽。"
+                 % (len(summary["lists"]), PY, paths.rerun_flags(a)))
+        elif a.include_lists:
+            _say("  加了 --include-lists：名單照快照寫回去了。接著一定要跑 %s scripts/access_sync.py%s 預覽，"
+                 "照這台電腦的名單檔把名單對回來（快照之後移除的人會在預覽裡列成「刪」）。" % (PY, paths.rerun_flags(a)))
         _say("  要反悔：先預覽 %s scripts/backup.py restore firestore --snapshot %s%s（看過再照它說的加 --apply）。"
              % (PY, pre_id, paths.rerun_flags(a)))
         if summary["create"]:
@@ -635,6 +745,12 @@ def main(argv=None):
     rf.add_argument("--only", action="append", metavar="路徑", help="只還原這個路徑（含底下全部）；可以給好幾次")
     rf.add_argument("--apply", action="store_true", help="真的寫（先自動做還原前快照）")
     rf.add_argument("--to-other-project", action="store_true", help="快照是別的專案的，也照樣寫（換專案時用）")
+    rf.add_argument("--include-lists", action="store_true",
+                    help="連名單（allowlist、private_allowlist、parent_child_map）也照快照寫回去（預設不寫，改用 access_sync.py）")
+    rf.add_argument("--include-exited", action="store_true",
+                    help="快照比資料退場早、裡面有已退場的資料，也照樣寫回去（預設停下來）")
+    rf.add_argument("--restore-visibility", action="store_true",
+                    help="覆蓋既有文件時，上架／下架、留言收起也照快照（預設留現在的樣子）")
     rr = rsub.add_parser("records", parents=[common], help="從紀錄備份 zip 還原 data/")
     rr.add_argument("--zip", default="latest", help="紀錄備份的檔名（records-日期時間.zip）或 latest")
     rr.add_argument("--overwrite", action="store_true", help="data/ 已經有、內容不同的檔也用備份蓋掉")

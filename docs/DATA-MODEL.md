@@ -98,7 +98,9 @@
     （`secrets.token_hex(6)`）。同一個人從名單移除再加回來會拿到新代號，舊留言在導師端顯示「（已不在名單）」。
   - 這個設計取代 v1 的 uid 對 email 身分表：不需要本人第一次登入時寫一次、沒有 set-once 錯誤碼的問題。
 - **角色標籤**：留言的 `role` 由規則強制等於 `allowlist` 的 `kind`（`teacher`／`parent`／`staff`），
-  前端固定在顯示名稱旁畫「導師／家長／同仁」標籤。顯示名稱是本人自填的，可以亂寫，但標籤假冒不了。
+  前端固定在顯示名稱旁畫「導師／家長／同仁」標籤。顯示名稱是本人自填的，可以亂寫（例如家長 A 署名「B 的媽媽」），但標籤假冒不了。
+  所以留言卡另外畫**作者代號的前 4 碼**（`#ab12`；`authorAlias` 由規則綁名單，冒用不了）：兩則署名一樣、短碼不一樣＝不是同一個帳號寫的。
+  要知道是哪一位，導師在留言後台用 `allowlist` 對回。
 
 ### 0.6 可見旗標與「規則不是過濾器」
 
@@ -111,8 +113,10 @@
 ### 0.7 權限表怎麼讀
 
 每個集合一張表：列＝操作，欄＝角色。每一欄是**持有該角色的典型帳號的實際權限**
-（座號家長、同仁、私密讀者一定也是讀者，會繼承讀者那一欄）。「未登入」欄同時代表「登入了但不在名單」。
-「腳本」欄＝管理腳本（IAM，不受規則管）。
+（座號家長、同仁、私密讀者一定也是讀者，會繼承讀者那一欄）。「未登入」欄同時代表「登入了但不在名單」；
+只有 §2.1、§2.2 兩張名單表把它拆成「未登入」與「登入但不在名單」兩欄（登入但不在名單的人能 get 自己那份、拿到「找不到」）。
+「讀者」欄＝Google 登入的讀者；**email 連結登入的讀者只有讀公開內容那幾格**（紀事、相簿、單頁與它們的照片、讀留言），
+凡是寫入（留言、回條）與私密內容都要 Google 登入（§1.1）。「腳本」欄＝管理腳本（IAM，不受規則管）。
 
 符號：✓ 允許｜✗ 拒絕｜條件寫在格子裡。「get」＝讀單一份、「list」＝查詢（含 count）。
 
@@ -126,17 +130,25 @@
 |---|---|---|
 | **未登入** | 任何人 | `request.auth == null` |
 | （已登入但不在名單） | 登入了但不在 `allowlist` | `isReader()` 為假 |
-| **班網讀者** | 家長與同仁（含 email 連結登入的人） | `isReader()`：email 已驗證 **且** `allowlist/{emailKey}` 存在 |
+| **班網讀者** | 家長與同仁（含 email 連結登入的人） | `isReader()`：email 已驗證 **且** `allowlist/{emailKey}` 存在。**寫入（留言、回條）另外要 `isGoogle()`** |
 | **座號家長** | 對應到自己孩子座號的家長 | `isParentOf(seat)`：**同時是讀者**＋Google 登入＋`parent_child_map/{emailKey}` 存在、`active == true`、`kind == 'parent'`、`seats` 含該座號 |
 | **同仁逐座號閱讀** | 導師授權可讀某幾個座號部落格的同仁 | `isSeatReaderOf(seat)` 裡 `kind == 'staff'` 的那一半；同樣要求同時是讀者＋Google 登入 |
-| **私密讀者** | 能看私密紀事的少數人 | `isPrivateReader()`：導師，或（讀者 **且** `private_allowlist/{emailKey}` 存在） |
+| **私密讀者** | 能看私密紀事的少數人 | `isPrivateReader()`：導師，或（讀者 **且** Google 登入 **且** `private_allowlist/{emailKey}` 存在） |
 | **導師**（1 位） | 班級導師本人 | `isTeacher()`：email 已驗證＋**Google 登入**＋`emailKey() == {{TEACHER_EMAIL_KEY}}` |
 
 - 導師的 email 鍵由 `scripts/build_config.py` 以 `{{TEACHER_EMAIL_KEY}}` 插進規則產生檔（渲染結果是**含雙引號**的
   JSON 字串，規則裡直接寫 `emailKey() == {{TEACHER_EMAIL_KEY}}`，不要自己加引號）。插進去之前已經過
   `EMAIL_RE`＋`email_key()`，擋掉引號與反斜線。導師 email **不會**出現在公開的 `site/js/site-config.js`（P1 已改）。
-- **座號家長與同仁必須是 Google 登入**。email 連結登入的帳號只能當班網讀者。
-- 沒有匿名登入。Firebase Auth 只開 Google 與「電子郵件連結（無密碼）」兩種。
+- **座號家長、同仁、私密讀者必須是 Google 登入；留言與已讀回條也要 Google 登入**。email 連結登入的帳號只能讀公開內容
+  （紀事、相簿、單頁、讀留言），前端對這種身分顯示「此登入方式只能閱讀，留言與私密內容請用 Google 登入。」
+- **為什麼（帳號預先註冊）**：email 連結登入要先在 Firebase 打開「電子郵件/密碼」，這個 provider 同時開放**密碼註冊**
+  （網頁的 apiKey 是公開的，任何人都能呼叫註冊 API）。攻擊者拿一位**還沒登入過班網**的家長信箱註冊密碼帳號、觸發驗證信，
+  家長一點「驗證信箱」，這個帳號就是 `email_verified == true`，而且 email 鍵對得上名單。規則分不出這個帳號和真的 email 連結登入：
+  兩者 token 的 `sign_in_provider` **都是 `'password'`**。所以規則只信 Google 登入（Google 帳號在本人手上）：
+  password 登入的人最多讀到全班讀者本來就讀得到的公開內容，冒不了名留言、簽不了回條、讀不到私密紀事與部落格。
+  非 Google 家長多、又要讓他們留言的班，要升 Blaze 並加 blocking function（`beforeUserCreated` 擋 `password` 註冊），
+  或乾脆不開 email 連結（INSTALL 第 2 節、AGENTS 第 2 步）。
+- 沒有匿名登入。Firebase Auth 只開 Google 與「電子郵件/密碼」（只為了其中的「電子郵件連結（無密碼）」；密碼註冊關不掉，見上一條）。
 - 導師的規則判定不看名單（`isTeacher()` 只比 email 鍵），但導師**要留言**時規則會讀導師自己的
   `allowlist` 文件拿 `kind` 與 `alias`，所以 `access_sync.py` 一定把導師放進名單。
 
@@ -147,9 +159,12 @@
 | 讀取 | 規則 | 結果怎麼解讀 |
 |---|---|---|
 | `allowlist/{自己的 emailKey}` | 本人可讀自己那份（不存在就回「找不到」） | 有文件＝讀者，順便拿到 `kind`、`alias`；找不到＝「尚未授權」畫面 |
-| `private_allowlist/{自己的 emailKey}` | 同上 | 有文件＝私密讀者（還要同時是讀者） |
+| `private_allowlist/{自己的 emailKey}` | 同上 | 有文件＝私密讀者（還要同時是讀者、而且 Google 登入）；**不是 Google 登入就不發這個請求** |
 | `parent_child_map/{自己的 emailKey}` | 讀者＋Google 登入才可讀自己那份 | 有文件且 `active`＝座號清單與 `kind`；**不是 Google 登入就不發這個請求** |
 | `site_access/teacher`（探針，文件不存在） | 只有 `isTeacher()` 放行 | 放行（回「找不到」）＝導師；被拒＝不是導師；**不是 Google 登入就不發** |
+
+「是不是 Google 登入」前端讀 ID token 的 `claims.firebase.sign_in_provider`（`getIdTokenResult()`），跟規則的 `isGoogle()` 同一個來源；
+不看 `providerData`（同一個信箱連結了 Google 與 email 連結時，`providerData` 有 `google.com`，但這一次可能是用 email 連結登入的）。
 
 前端的角色判斷**只拿來決定畫面長什麼樣，不是安全邊界**；真正的邊界永遠是規則。Session 可以暫存在
 `sessionStorage`（每個分頁第一次載入、之後每 30 分鐘、或登入狀態改變時才重新解析），省讀取次數。
@@ -177,16 +192,16 @@
 |---|---|---|
 | `signedIn()` | `request.auth != null` | 0 |
 | `verified()` | 已登入＋`email_verified == true`＋email（去掉前後空白後）符合 `EMAIL_RE`＋gmail 去掉點號後不是空的。`emailKey()` 只准在它為真之後呼叫 | 0 |
-| `isGoogle()` | `sign_in_provider == 'google.com'`（email 連結登入是 `'password'`；用 `.get()` 取值，token 少欄位也不會出錯） | 0 |
+| `isGoogle()` | `sign_in_provider == 'google.com'`（email 連結與密碼登入都是 `'password'`，分不出來，§1.1；用 `.get()` 取值，token 少欄位也不會出錯） | 0 |
 | `emailKey()` | §0.3：`trim().lower()`；gmail／googlemail 去掉 `@` 前面的點號（`replace('[.]', '')`）並統一 `gmail.com` | 0 |
 | `isTeacher()` | `verified() && isGoogle() && emailKey() == {{TEACHER_EMAIL_KEY}}` | 0 |
 | `allowDoc()` | 自己的 `allowlist` 文件（不在名單＝`null`） | 1 |
 | `isReader()` | `verified() && allowDoc() != null` | 1 |
-| `isPrivateReader()` | `isTeacher() \|\|（isReader() && private_allowlist 有自己）` | 2 |
+| `isPrivateReader()` | `isTeacher() \|\|（isReader() && isGoogle() && private_allowlist 有自己）` | 2 |
 | `hasSeat(seat, kinds)` → `isParentOf(seat)`、`isSeatReaderOf(seat)` | `isReader() && isGoogle()`＋自己的 `parent_child_map` 存在、`active == true`、`kind` 在 `kinds` 裡、`seats` 含該座號（取欄位一律 `.get(欄位, 預設)`） | 2 |
 | `validSeat`、`validDate`、`validPostId`、`validAlias`、`strLen`、`intIn` | §0.4 的格式；字串長度、整數範圍（型別不對一律假） | 0 |
 | `visibleDoc(d)` | `d != null && d.data.visible == true`（`d` 由呼叫端傳入，同一份文件只讀一次） | 0 |
-| `validNewComment(me)`、`canCreateComment(ticket, parent)`、`onlyStatusChange()`、`validReceipt(key, me)` | 三種討論串共用的留言與回條規則（§2.7、§2.8）；`me`＝`allowDoc()`，取 `kind`、`alias` 不必再讀一次 | 見 §1.6 |
+| `validNewComment(me)`、`canCreateComment(ticket, parent)`、`onlyStatusChange()`、`validReceipt(key, me)` | 三種討論串共用的留言與回條規則（§2.7、§2.8）；`me`＝`allowDoc()`，取 `kind`、`alias` 不必再讀一次。`canCreateComment`、`validReceipt` 都要 `isGoogle()` | 見 §1.6 |
 
 **寫法約定**（改規則的人要守，樣板開頭也寫了）：讀文件的呼叫（`get`／`exists`）用函式參數接住再用，同一份文件在一條規則裡
 只寫一次；第一版骨架的 `myKind()`、`myAlias()`、`seatMap()` 那種「每用一次就再 get 一次」的寫法改成傳參數，最壞情況的次數才估得準（§1.6）。
@@ -234,8 +249,12 @@ allow list: if isTeacher() || (isReader() && resource.data.visible == true);
 在 `check.py` 裡擋「任何一條 > 10、批次 > 20」）。**查詢（list）這一項只能靠它**：模擬器對查詢量到的上限是 20，比正式環境的 10 寬。
 
 照片寫入**刻意不**用 `getAfter()` 檢查「同一批裡真的有那篇文章」：那會讓每個照片寫入多 1–2 次，
-7 個寫入的批次在沒快取時會超過 20。代價只是「家長可以在自己座號底下寫孤兒照片文件」，前端只顯示
-文章 `photos` 清單列出的 pid，孤兒文件看不到；`backup.py` 對帳時列出孤兒給導師清。
+7 個寫入的批次在沒快取時會超過 20。代價是「家長可以在自己座號底下寫孤兒照片文件」（沒有文章、或不在文章
+`photos` 清單裡），而且規則沒有數量上限：**單一家長帳號就能把 Spark 的 1 GiB 灌滿**，之後全班的寫入都會失敗。
+前端只顯示文章 `photos` 清單列出的 pid，孤兒文件看不到。實況：`backup.py firestore` 備份完對帳，印出孤兒照片的
+座號、遮住的 postId、份數與估算大小（不印內容），統計記進 `data/ledgers/backup-state.json`，`status.py` 跟著提醒；
+`data_exit.py seat`（整個座號的部落格本來就全刪）與 `data_exit.py parent`（他對應座號底下的孤兒）會一起刪。
+處置（先撤那個帳號擋住來源、再清）寫在 `playbooks/data-exit.md` 第 5 段「孤兒照片」。
 
 ---
 
@@ -253,8 +272,8 @@ allow list: if isTeacher() || (isReader() && resource.data.visible == true);
 | `posts/{slug}` | slug | 班級紀事摘要（列表用） | 腳本 | 讀者（可見者）、導師 | v1 |
 | `posts/{slug}/content/main` | 固定 `main` | 紀事正文區塊 | 腳本 | 同父文件 | v1 |
 | `{主人}/thumbs/{pid}`、`{主人}/images/{pid}` | pid | 照片：縮圖、顯示圖（base64 JPEG） | 腳本；部落格文章的照片由座號家長與導師在瀏覽器寫 | 同主人文件 | v1 |
-| `{紀事、相簿、私密紀事}/comments/{cid}` | 自動 | 留言 | 讀者（私密紀事：私密讀者）、導師 | 同左（可見者）、導師 | v1 |
-| `{紀事、私密紀事}/reads/{key}` | email 鍵 | 已讀回條 | 讀者（私密紀事：私密讀者） | 本人（自己那份）、導師 | v1 |
+| `{紀事、相簿、私密紀事}/comments/{cid}` | 自動 | 留言 | Google 登入的讀者（私密紀事：私密讀者）、導師 | 讀者（私密紀事：私密讀者；可見者）、導師 | v1 |
+| `{紀事、私密紀事}/reads/{key}` | email 鍵 | 已讀回條 | Google 登入的讀者（私密紀事：私密讀者） | 本人（自己那份）、導師 | v1 |
 | `albums/{slug}` | slug | 相簿（照片在子集合） | 腳本 | 讀者（可見者）、導師 | v1 |
 | `private_posts/{slug}` | slug | 私密紀事（摘要＋正文同一份） | 腳本 | 私密讀者（可見者）、導師 | v1 |
 | `pages/{pageId}` | pageId | 首頁橫幅、課程頁、關於我們、專題活動、行事曆、獨立單頁 | 腳本 | 讀者（可見者）、導師 | v1（詩 v1.1） |
@@ -282,12 +301,12 @@ allow list: if isTeacher() || (isReader() && resource.data.visible == true);
 
 **不放姓名、座號、電話**。
 
-| 操作 | 未登入 | 讀者 | 座號家長 | 同仁 | 私密讀者 | 導師 | 腳本 |
-|---|---|---|---|---|---|---|---|
-| get 自己那份 | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| get 別人那份 | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
-| list | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
-| 建／改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| 操作 | 未登入 | 登入但不在名單 | 讀者 | 座號家長 | 同仁 | 私密讀者 | 導師 | 腳本 |
+|---|---|---|---|---|---|---|---|---|
+| get 自己那份 | ✗ | ✓（email 已驗證；回「找不到」） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| get 別人那份 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| list | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| 建／改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
 「get 自己那份」只要求 email 已驗證（`verified() && key == emailKey()`）：不在名單的人讀自己那份拿到「找不到」，
 這正是前端判斷「尚未授權」的方式（§1.2）。規則裡的 `get()` 是伺服器特權查詢，不受這張表限制。
@@ -298,12 +317,14 @@ allow list: if isTeacher() || (isReader() && resource.data.visible == true);
 |---|---|---|---|
 | `updatedAt` | timestamp | ✓ | |
 
-| 操作 | 未登入 | 讀者 | 座號家長 | 同仁 | 私密讀者 | 導師 | 腳本 |
-|---|---|---|---|---|---|---|---|
-| get 自己那份（不在名單就回「找不到」） | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| get 別人那份、list | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
-| 建／改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| 操作 | 未登入 | 登入但不在名單 | 讀者 | 座號家長 | 同仁 | 私密讀者 | 導師 | 腳本 |
+|---|---|---|---|---|---|---|---|---|
+| get 自己那份（不在名單就回「找不到」） | ✗ | ✓（email 已驗證；回「找不到」） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| get 別人那份、list | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| 建／改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
+規則是 `verified() && key == emailKey()`，**不看登入方式**：email 連結登入、在這份名單裡的人也讀得到自己那份（只有 `updatedAt`），
+但他不是私密讀者（§1.1），私密紀事照樣被拒。前端對非 Google 登入根本不發這個請求（§1.2）。
 導師的 email 鍵一定在裡面。私密紀事「已讀 X/N」的 N＝這份名單的人數減掉導師（§2.8）。
 
 ### 2.3 `site_access/teacher` — 導師探針
@@ -405,9 +426,9 @@ v1.1 的 `config/notify` 見 §2.18。
 
 | 父集合 | 討論串門票 | 父文件必須 |
 |---|---|---|
-| `posts` | `isReader()` | 存在且 `visible == true`（導師：存在即可） |
-| `albums` | `isReader()` | 同上 |
-| `private_posts` | `isPrivateReader()` | 同上 |
+| `posts` | `isReader()`（讀）；建立另要 `isGoogle()` | 存在且 `visible == true`（導師：存在即可） |
+| `albums` | `isReader()`（讀）；建立另要 `isGoogle()` | 同上 |
+| `private_posts` | `isPrivateReader()`（本身就要 Google 登入） | 同上 |
 
 父文件下架以後，**非導師連讀帶寫都不行**（下架的內容連同底下的討論一起收起來，知道網址也讀不到、留不了言）：規則的讀與建都 `get()` 父文件檢查 `visible`。
 導師在下架的父文件底下照樣能讀能留言，但父文件**必須存在**（不能在不存在的紀事底下留孤兒留言；與部落格對話串「文章存在」同一個標準）。
@@ -416,7 +437,7 @@ v1.1 的 `config/notify` 見 §2.18。
 
 | 欄位 | 型別 | 必填 | 限制／規則驗什麼 |
 |---|---|---|---|
-| `authorName` | string | ✓ | 1–20 字；本人自填的署名（例「A 的媽媽」），導師預設帶 `config/site.teacherDisplayName` |
+| `authorName` | string | ✓ | 1–20 字；本人自填的署名（例「A 的媽媽」），導師預設帶 `config/site.teacherDisplayName`。**不可信**：可以署別人的名字，所以留言卡旁邊畫 `authorAlias` 前 4 碼（§0.5） |
 | `body` | string | ✓ | 1–500 字；純文字（前端渲染規則見 ARCHITECTURE §4.3） |
 | `role` | string | ✓ | 必須等於自己名單上的 `kind`（`teacher`／`parent`／`staff`）；是 `'teacher'` 時還必須 `isTeacher()` |
 | `authorAlias` | string | ✓ | 符合 `^[a-z0-9]{12}$`，而且等於自己名單上的 `alias` |
@@ -429,7 +450,7 @@ v1.1 的 `config/notify` 見 §2.18。
 | 讀 `visible`（`posts`、`albums`；父文件可見） | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 讀 `visible`（`private_posts`；父文件可見） | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
 | 讀 `hidden`、讀下架父文件底下的留言 | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
-| 建（門票＋父文件可見＋欄位驗證） | ✗ | ✓ | ✓ | ✓ | ✓（`private_posts` 只有這欄起） | ✓（父文件存在即可，不論可見） | ✓ |
+| 建（Google 登入＋門票＋父文件可見＋欄位驗證） | ✗ | ✓（Google 登入；email 連結 ✗） | ✓ | ✓ | ✓（`private_posts` 只有這欄起） | ✓（父文件存在即可，不論可見） | ✓ |
 | 改（只准動 `status`） | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
 | 刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓（資料退場） |
 
@@ -445,13 +466,13 @@ v1.1 的 `config/notify` 見 §2.18。
 | `kind` | string | ✓ | 等於自己名單上的 `kind`，而且只能是 `'parent'`／`'staff'`（導師不寫回條） |
 | `readAt` | timestamp | ✓ | `== request.time` |
 
-doc id 必須 `== emailKey()`（不能替別人簽到）。
+doc id 必須 `== emailKey()`（不能替別人簽到）；建立要 Google 登入（`validReceipt` 裡的 `isGoogle()`，§1.1）。
 
 | 操作 | 未登入 | 讀者 | 座號家長 | 同仁 | 私密讀者 | 導師 | 腳本 |
 |---|---|---|---|---|---|---|---|
 | get 自己那份 | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | get 別人那份、list、count | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
-| 建（門票＋父文件可見） | ✗ | ✓（`posts`） | ✓（`posts`） | ✓（`posts`） | ✓（兩者） | ✗ | ✓ |
+| 建（Google 登入＋門票＋父文件可見） | ✗ | ✓（`posts`；Google 登入，email 連結 ✗） | ✓（`posts`） | ✓（`posts`） | ✓（兩者） | ✗ | ✓ |
 | 改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
 - **寫法**（前端 `markRead`）：先 get 自己那份；「找不到」才建。**不靠「第二次寫入被拒」**判斷已讀過
@@ -513,6 +534,7 @@ doc id 必須 `== emailKey()`（不能替別人簽到）。
 | 讀照片（可見時） | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
 | 建／改／刪 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
+- 私密讀者一定是 Google 登入（§1.1）：email 連結登入的人就算在 `private_allowlist` 裡也被拒，畫面說明要改用 Google 登入。
 - **併入紀事列表**：Session 沒有私密讀者身分的前端**根本不發** `private.list`；就算發了被拒，也靜默不顯示任何痕跡。
 - 靜態殼裡**不得出現任何一篇私密紀事的標題、日期或路徑**。一般紀事的「上一篇／下一篇」只在 `posts` 之間走。
 - 留言見 §2.7（門票 `isPrivateReader()`），回條見 §2.8。
@@ -628,7 +650,7 @@ doc id 必須 `== emailKey()`（不能替別人簽到）。
 |---|---|---|---|---|
 | `title` | string | ✓ | 1–200 字 | 發文者；之後導師可改 |
 | `body` | string | ✓ | 1–10,000 字；**純文字、逐字保留**；不建索引 | 發文者；之後導師可改 |
-| `date` | string | ✓ | `YYYY-MM-DD` | 發文者 |
+| `date` | string | ✓ | `YYYY-MM-DD`，**而且等於 `postId` 的前 10 碼**（規則 `d.date == postId[0:10]`：不能把日期填到未來、釘在最上面） | 發文者 |
 | `author` | string | ✓ | 家長發 `'parent'`、導師發 `'teacher'`，與登入身分一致 | 發文者 |
 | `authorAlias` | string | ✓ | 符合 `^[a-z0-9]{12}$`，而且等於自己名單上的 `alias`（腳本發的導師文寫導師的代號） | 發文者 |
 | `photos` | array<map> | ✓ | 0–3 個；第 i 個必須是 `{ pid: 'i', w, h, caption? }`（`caption` ≤ 300 字）；可以是空陣列 | 發文者 |
@@ -923,6 +945,9 @@ Firestore 模擬器**不檢查複合索引**，本機全綠的查詢上線才噴
   所以：Google 登入是主要入口（家長有 Gmail 就用它，沒有數量限制）；email 連結給沒有 Google 帳號的人，
   開學第一週請老師分批發連結（一天最多 5 位）。超過時前端顯示「今天的登入信額度用完了，請改用 Google 帳號登入，或明天再試」
   （ARCHITECTURE §3.4）。非 Google 帳號的家長很多的班級，建議直接升 Blaze（§5.4）。
+- **這 5 封任何知道網址的人都能耗盡**：登入閘的「寄登入連結」不需要先登入，隨便填 5 個信箱，當天全班沒有 Google 帳號的家長
+  就收不到登入信（也等於能用班網的網域寄信給任意地址）。建議開 **App Check（reCAPTCHA）** 擋掉不是從你網站送出的請求，
+  或乾脆**不開 email 連結**（只用 Google 登入；§1.1 另有「帳號預先註冊」的理由）。
 
 ### 5.2 一個班一年的估算
 
@@ -1079,8 +1104,8 @@ Firestore 的 REST 沒有「遞迴刪除」：刪一份文件不會刪它底下�
 2. **作者代號 `alias` 取代「直接存 email 鍵」**（§0.5）：最早的構想是「留言與回條直接存規則驗過的 emailKey」；
    本文件只在導師才讀得到的回條這樣做，全班讀得到的留言與部落格改存規則驗過的 `alias`，理由是 Firestore 沒有欄位層級讀取權限，
    存 email 會把信箱公開給全班。導師端對回身分的方式不變（多查一次 `allowlist`）。
-3. **刪 Firebase Auth 帳號**（資料退場）：走主控台手動（零額外 API），或腳本呼叫 Identity Toolkit 管理 API
-   （使用者憑證要帶 `x-goog-user-project`）。P4 決定，劇本兩種都寫。
+3. **刪 Firebase Auth 帳號**（資料退場）：已定案＝**主控台手動**（零額外 API）。`data_exit.py` 不刪登入帳號，
+   只把要刪的完整信箱寫進只給老師開的清單檔、印主控台的操作步驟（`scripts/data_exit.py` 開頭說明、`playbooks/data-exit.md`）。
 4. P2 與 P3 平行施工時，唯一的共同介面就是：本文件的欄位白名單與權限表、§4 的查詢登記表（`CMW.QUERIES`）、
    §0.3 的 email 鍵測試向量、ARCHITECTURE §4.1 的區塊格式。任何一邊想改，先改文件再通知另一邊。
 
@@ -1105,6 +1130,8 @@ Firestore 的 REST 沒有「遞迴刪除」：刪一份文件不會刪它底下�
 | `content/{docId}` | 任何 id | 只有 `main` | §2.6 規定正文固定叫 `main` |
 | 部落格文章的建立 | `isTeacher() && validNewEntry('teacher')` 或家長那條，`validNewEntry` 各算一次 | `validNewEntry(isTeacher() ? 'teacher' : 'parent', allowDoc()) && (isTeacher() \|\| isParentOf(seat))` | 最壞次數 4 → 3，批次 15 |
 | 照片 `order` | `== int(pid)` | 另外要求 `is int` | 小數 `0.0` 不算 |
+| 私密門票、留言、回條 | 讀者（私密：＋私密名單）即可 | 另外要 `isGoogle()` | 帳號預先註冊（§1.1）：email 連結與密碼登入的 token 分不出來 |
+| 部落格文章 `date` | 只驗格式 | 另外要 `== postId[0:10]` | 不能把日期填到未來、釘在列表最上面 |
 
 ```
 rules_version = '2';
@@ -1140,6 +1167,8 @@ service cloud.firestore {
     }
 
     // Google 登入。email 連結登入的 sign_in_provider 是 'password'，不算。
+    // 密碼登入的 sign_in_provider 也是 'password'，規則分不出這兩種；而任何人都能拿一個還沒登入過的家長信箱
+    // 先註冊密碼帳號（DATA-MODEL §1.1）。所以非導師的寫入與私密讀取一律要 isGoogle()，email 連結讀者只能讀公開內容。
     function isGoogle() {
       return request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'google.com';
     }
@@ -1172,9 +1201,9 @@ service cloud.firestore {
       return verified() && allowDoc() != null;
     }
 
-    // 私密讀者：導師，或（讀者而且在 private_allowlist）
+    // 私密讀者：導師，或（讀者＋Google 登入＋在 private_allowlist）
     function isPrivateReader() {
-      return isTeacher() || (isReader()
+      return isTeacher() || (isReader() && isGoogle()
         && exists(/databases/$(database)/documents/private_allowlist/$(emailKey())));
     }
 
@@ -1243,10 +1272,11 @@ service cloud.firestore {
         && (!('replyTo' in d) || (d.replyTo is string && d.replyTo.matches('^[A-Za-z0-9]{1,64}$')));
     }
 
-    // 建留言：導師（父文件存在即可，不論可見），或有門票（ticket）而且父文件存在且可見；欄位另驗。
+    // 建留言：一律 Google 登入；導師（父文件存在即可，不論可見），或有門票（ticket）而且父文件存在且可見；欄位另驗。
     // ticket＝呼叫端算好的 isReader()／isPrivateReader()；parent＝父文件（可能是 null）。
     function canCreateComment(ticket, parent) {
-      return ((isTeacher() && parent != null) || (ticket && visibleDoc(parent)))
+      return isGoogle()
+        && ((isTeacher() && parent != null) || (ticket && visibleDoc(parent)))
         && validNewComment(allowDoc());
     }
 
@@ -1256,10 +1286,11 @@ service cloud.firestore {
         && request.resource.data.status in ['visible', 'hidden'];
     }
 
-    // 回條：doc id 必須是自己的 email 鍵；kind 等於自己名單上的 kind 而且不是導師；readAt 是伺服器時間。
+    // 回條：Google 登入；doc id 必須是自己的 email 鍵；kind 等於自己名單上的 kind 而且不是導師；readAt 是伺服器時間。
     function validReceipt(key, me) {
       let d = request.resource.data;
       return me != null
+        && isGoogle()
         && key == emailKey()
         && d.keys().hasAll(['kind', 'readAt'])
         && d.keys().hasOnly(['kind', 'readAt'])
@@ -1471,6 +1502,7 @@ service cloud.firestore {
             && (ps.size() < 3 || validPhotoRef(ps[2], '2'));
         }
         // 新文章。author：導師 'teacher'、家長 'parent'；me＝自己的 allowlist 文件。
+        // date 綁 postId 的前 10 碼（不能把文章日期填到未來、釘在最上面）。
         function validNewEntry(author, me) {
           let d = request.resource.data;
           return me != null
@@ -1479,6 +1511,7 @@ service cloud.firestore {
             && strLen(d.title, 1, 200)
             && strLen(d.body, 1, 10000)
             && validDate(d.date)
+            && d.date == postId[0:10]
             && d.author == author
             && validAlias(d.authorAlias)
             && d.authorAlias == me.data.get('alias', '')
@@ -1644,7 +1677,10 @@ P3 的規則測試（ARCHITECTURE §8.2）必測、而且是最容易寫錯的�
 - 非導師查詢少帶 `visible`／`status` 條件被拒；集合群組查詢只有導師能跑。→「查詢形狀」「集合群組」
 - `role`、`authorAlias`、`kind` 冒名（填別人的代號、讀者填 `'teacher'`）被拒。→「欄位白名單」
 - 導師 email 用 gmail 點號寫法登入也認得是導師；用 email 連結登入的導師帳號**不是**導師（`isGoogle()`）。→「導師身分」兩段
-- 測試本身會咬人：拿掉關鍵判斷（座號不看名單、列表不看 `visible`、留言不看父文件、不驗代號、導師不必 Google……），對應的案例必須翻盤。→「咬人檢查」
+- password 登入（email 連結，或別人預先註冊的密碼帳號）、email 已驗證、在私密名單：讀得到公開紀事，讀不到私密紀事、留不了言、簽不了回條；
+  同一個信箱改用 Google 登入就全部恢復（§1.1）。→「預先註冊的密碼帳號」、各權限表的 `linkPrivate` 角色
+- 測試本身會咬人：拿掉關鍵判斷（座號不看名單、列表不看 `visible`、留言不看父文件、不驗代號、導師不必 Google、私密／留言／回條不必 Google、
+  文章日期不綁 `postId`……），對應的案例必須翻盤。→「咬人檢查」
 
 ---
 

@@ -161,6 +161,159 @@ class TestRecords(Env):
         self.assertEqual(self.run_main("records", "--keep", "0")[0], 2)
 
 
+class FakeRestoreClient(object):
+    """還原預覽用得到的兩個方法。now＝{路徑: 解碼後的欄位}（現在資料庫裡有的）。"""
+
+    def __init__(self, now):
+        self.now = now
+        self.gets = 0
+
+    def describe_target(self):
+        return "假的資料庫"
+
+    def batch_get(self, paths_, mask=None):
+        from lib import firestore_rest as fr
+        self.gets += 1
+        return {p: (fr.Doc(p, dict(self.now[p])) if p in self.now else None) for p in paths_}
+
+
+class TestRestoreGates(Env):
+    """整庫還原（backup.py restore firestore）的三道閘：名單不寫、退場的人不復活、下架的不自動上架。"""
+    KEY = "p@example.com"
+
+    def snapshot(self, created):
+        from lib import fsbackup as fsb
+        ex = fsb.Export()
+        ex.docs = [{"path": p, "fields": f, "createTime": "", "updateTime": ""} for p, f in (
+            ("allowlist/" + self.KEY, {"alias": {"stringValue": "a" * 12}}),
+            ("parent_child_map/" + self.KEY, {"kind": {"stringValue": "parent"}}),
+            ("posts/p", {"title": {"stringValue": "紀事"}, "visible": {"booleanValue": True}}),
+            ("posts/p/comments/c", {"body": {"stringValue": "好"}, "status": {"stringValue": "visible"}}),
+            ("student_blogs/03", {"seat": {"stringValue": "03"}}),
+            ("student_blogs/05/entries/2026-10-05-parentxx", {"authorAlias": {"stringValue": "b" * 12}}),
+        )]
+        base = self.data / "backups" / "firestore"
+        fsb.write_snapshot(base, "20261001-120000", fx.config()["firebase"]["project_id"], ex, [], created=created)
+
+    def preview(self, *extra, now=None):
+        client = FakeRestoreClient(now or {})
+        with mock.patch.object(backup.Ctx, "client", lambda self_: client):
+            rc, out = self.run_main("restore", "firestore", *extra)
+        return rc, out, client
+
+    def test_lists_excluded_and_hidden_kept_in_preview(self):
+        self.configure()
+        self.snapshot("2026-01-01T12:00:00+08:00")
+        rc, out, _ = self.preview(now={"posts/p": {"visible": False}, "posts/p/comments/c": {"status": "hidden"}})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("名單類", out)
+        self.assertIn("access_sync.py", out)
+        self.assertIn("保留下架", out)
+        self.assertNotIn(self.KEY, out)
+        paths.set_root(self.root)
+        plan = sorted((self.data / "exports").glob("restore-plan-*.txt"))[-1].read_text(encoding="utf-8")
+        self.assertIn("不還原（名單類） allowlist/", plan)
+        self.assertIn("保留下架 posts/p", plan)
+        self.assertNotIn("新建 allowlist/", plan)
+        rc, out, _ = self.preview("--restore-visibility", now={"posts/p": {"visible": False}})
+        self.assertIn("還原後會重新變可見", out)
+        rc, out, _ = self.preview("--only", "allowlist")
+        self.assertEqual(rc, 2, "只挑名單 → 沒東西可還原")
+
+    def test_stops_on_exit_after_snapshot(self):
+        self.configure()
+        self.snapshot("2026-01-01T12:00:00+08:00")
+        paths.set_root(self.root)
+        ledgers.record_exit("seat", seats=["03"], keys=[self.KEY], aliases=["a" * 12])
+        rc, out, client = self.preview()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("已經退場", out)
+        self.assertIn("student_blogs/03", out)
+        self.assertIn("--include-exited", out)
+        self.assertEqual(client.gets, 0, "停下來之前一次都沒讀資料庫")
+        rc, out, _ = self.preview("--only", "posts/p")
+        self.assertEqual(rc, 0, "避開退場的資料就照常")
+        rc, out, _ = self.preview("--include-exited")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--include-exited", out)
+
+    def test_exit_before_snapshot_does_not_block(self):
+        self.configure()
+        paths.set_root(self.root)
+        ledgers.record_exit("seat", seats=["03"])
+        self.snapshot("2099-01-01T00:00:00+08:00")
+        rc, out, _ = self.preview()
+        self.assertEqual(rc, 0, "快照比退場晚（例如新學年同一個座號換了人）→ 不擋")
+
+    def test_year_end_pending_blocks(self):
+        self.configure()
+        self.snapshot("2026-01-01T12:00:00+08:00")
+        paths.set_root(self.root)
+        ledgers.mark_year_end("archive")
+        rc, out, _ = self.preview("--only", "posts/p")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("學年封存", out)
+
+    def test_parent_exit_blocks_photo_only_restore(self):
+        from lib import fsbackup as fsb
+        self.configure()
+        self.snapshot("2026-01-01T12:00:00+08:00")
+        e = "student_blogs/05/entries/2026-10-05-parentxx"
+        base = self.data / "backups" / "firestore"
+        # 快照裡加一張他那篇文章的縮圖（照片列）
+        man, docs, _ = fsb.load_snapshot(base / "20261001-120000")
+        pool = fsb.Pool(base / "photos")
+        key = fsb.pool_key(e + "/thumbs/0", "t")
+        pool.save({"path": e + "/thumbs/0", "fields": {"data": {"stringValue": "AAAA"}}}, key)
+        import shutil as _sh
+        _sh.rmtree(str(base / "20261001-120000"))
+        ex = fsb.Export()
+        ex.docs = docs
+        fsb.write_snapshot(base, "20261001-120000", man["project"], ex,
+                           [{"path": e + "/thumbs/0", "updateTime": "t", "key": key, "md5": "m"}], created=man["created"])
+        paths.set_root(self.root)
+        ledgers.record_exit("parent", keys=["q@example.com"], aliases=["b" * 12])
+        rc, out, client = self.preview("--only", e + "/thumbs")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("已經退場", out)
+        self.assertEqual(client.gets, 0)
+
+    def test_exit_ledger_has_no_email(self):
+        paths.set_root(self.root)
+        ledgers.record_exit("parent", keys=[self.KEY], aliases=["a" * 12])
+        text = ledgers.exit_ledger_path().read_text(encoding="utf-8")
+        self.assertNotIn(self.KEY, text)
+        self.assertNotIn("a" * 12, text)
+        (rec,) = ledgers.read_exits()
+        self.assertEqual(rec["keyHashes"], [ledgers.exit_hash(self.KEY)])
+
+
+class TestOrphanReport(Env):
+    def test_prints_seat_count_size_only(self):
+        from lib import fsbackup as fsb
+        pool = fsb.Pool(self.tmp / "pool")
+        e = "student_blogs/05/entries/2026-10-05-secretid"
+        ex = fsb.Export()
+        ex.docs = [{"path": e, "fields": {"photos": {"arrayValue": {}}, "body": {"stringValue": "不該印出來的內文"}}}]
+        ex.photos = [{"path": e + "/images/0"}, {"path": "student_blogs/07/entries/2026-10-06-ghostxyz/thumbs/1"}]
+        key = fsb.pool_key(e + "/images/0", "t")
+        pool.save({"path": e + "/images/0", "fields": {"data": {"stringValue": "Z" * 5000}}}, key)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            s = backup.orphan_report(ex, [{"path": e + "/images/0", "key": key}], pool)
+        out = buf.getvalue()
+        self.assertEqual(s["count"], 2)
+        self.assertGreater(s["seats"]["05"]["bytes"], 5000)
+        self.assertIn("座號 05", out)
+        self.assertIn("座號 07", out)
+        self.assertNotIn("secretid", out)
+        self.assertNotIn("不該印出來", out)
+        self.assertNotIn("ZZZZ", out)
+        with redirect_stdout(io.StringIO()) as quiet:
+            self.assertEqual(backup.orphan_report(fsb.Export(), [], pool)["count"], 0)
+        self.assertEqual(quiet.getvalue(), "", "沒有孤兒就不吵")
+
+
 class TestBlogMarkdown(unittest.TestCase):
     def test_verbatim_body_comments_and_hidden(self):
         md = backup.blog_markdown("03", "2026-10-03-abcdefgh",

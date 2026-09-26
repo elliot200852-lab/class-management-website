@@ -55,8 +55,14 @@ py -3 scripts/doctor.py            （Windows）
    Gemini、Google Analytics 可以關。
 2. Firestore（Databases & Storage → Firestore）→ 建立資料庫：**Standard 版**、ID `(default)`、位置 `asia-east1`（或你要的地區，
    建好不能改）、**正式版模式（Production mode）**。
-3. Authentication（Security → Authentication）→ 開始使用 → 登入方式：啟用 **Google**（支援信箱選你自己）；啟用
-   **電子郵件/密碼**，並打開 **電子郵件連結（無密碼登入）**。
+3. Authentication（Security → Authentication）→ 開始使用 → 登入方式：啟用 **Google**（支援信箱選你自己）。
+   （選用，給沒有 Google 帳號的家長）啟用 **電子郵件/密碼**，並打開 **電子郵件連結（無密碼登入）**。開之前先知道兩個代價：
+   - **帳號可被預先註冊**：這個 provider 同時開放密碼註冊，任何人都能拿一位**還沒登入過班網**的家長信箱先註冊，家長點了驗證信，
+     那個帳號就能以家長身分登入。所以本網站讓 email 連結登入的人**只能讀公開的紀事與相簿**；留言、已讀回條、私密紀事、
+     「我的孩子」一律要 Google 登入（`docs/DATA-MODEL.md` §1.1）。
+   - **每天 5 封登入信任何知道網址的人都能耗盡**（Spark）。App Check（reCAPTCHA）擋得住，但要網頁程式配合、v0.1 還沒內建。
+   - 對策：家長幾乎都有 Google 帳號 → **不開**。非 Google 家長多、又要讓他們留言 → 升 Blaze，自己加一支 blocking function
+     （`beforeUserCreated` 擋 `password` 註冊；本專案沒有內建）。
 4. Hosting（Hosting & Serverless → Hosting）→ 開始使用 → 一路下一步到「前往主控台」。畫面上的指令**不要照打**
    （尤其不要 `firebase init`，會蓋掉這個專案的 `firebase.json`）。
 5. 專案總覽 → `</>` 新增網頁應用程式（不用勾 Hosting）→ 記下 `firebaseConfig` 的 `projectId`、`apiKey`、`appId`、`messagingSenderId`。

@@ -31,6 +31,8 @@ service cloud.firestore {
     }
 
     // Google 登入。email 連結登入的 sign_in_provider 是 'password'，不算。
+    // 密碼登入的 sign_in_provider 也是 'password'，規則分不出這兩種；而任何人都能拿一個還沒登入過的家長信箱
+    // 先註冊密碼帳號（DATA-MODEL §1.1）。所以非導師的寫入與私密讀取一律要 isGoogle()，email 連結讀者只能讀公開內容。
     function isGoogle() {
       return request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'google.com';
     }
@@ -63,9 +65,9 @@ service cloud.firestore {
       return verified() && allowDoc() != null;
     }
 
-    // 私密讀者：導師，或（讀者而且在 private_allowlist）
+    // 私密讀者：導師，或（讀者＋Google 登入＋在 private_allowlist）
     function isPrivateReader() {
-      return isTeacher() || (isReader()
+      return isTeacher() || (isReader() && isGoogle()
         && exists(/databases/$(database)/documents/private_allowlist/$(emailKey())));
     }
 
@@ -134,10 +136,11 @@ service cloud.firestore {
         && (!('replyTo' in d) || (d.replyTo is string && d.replyTo.matches('^[A-Za-z0-9]{1,64}$')));
     }
 
-    // 建留言：導師（父文件存在即可，不論可見），或有門票（ticket）而且父文件存在且可見；欄位另驗。
+    // 建留言：一律 Google 登入；導師（父文件存在即可，不論可見），或有門票（ticket）而且父文件存在且可見；欄位另驗。
     // ticket＝呼叫端算好的 isReader()／isPrivateReader()；parent＝父文件（可能是 null）。
     function canCreateComment(ticket, parent) {
-      return ((isTeacher() && parent != null) || (ticket && visibleDoc(parent)))
+      return isGoogle()
+        && ((isTeacher() && parent != null) || (ticket && visibleDoc(parent)))
         && validNewComment(allowDoc());
     }
 
@@ -147,10 +150,11 @@ service cloud.firestore {
         && request.resource.data.status in ['visible', 'hidden'];
     }
 
-    // 回條：doc id 必須是自己的 email 鍵；kind 等於自己名單上的 kind 而且不是導師；readAt 是伺服器時間。
+    // 回條：Google 登入；doc id 必須是自己的 email 鍵；kind 等於自己名單上的 kind 而且不是導師；readAt 是伺服器時間。
     function validReceipt(key, me) {
       let d = request.resource.data;
       return me != null
+        && isGoogle()
         && key == emailKey()
         && d.keys().hasAll(['kind', 'readAt'])
         && d.keys().hasOnly(['kind', 'readAt'])
@@ -362,6 +366,7 @@ service cloud.firestore {
             && (ps.size() < 3 || validPhotoRef(ps[2], '2'));
         }
         // 新文章。author：導師 'teacher'、家長 'parent'；me＝自己的 allowlist 文件。
+        // date 綁 postId 的前 10 碼（不能把文章日期填到未來、釘在最上面）。
         function validNewEntry(author, me) {
           let d = request.resource.data;
           return me != null
@@ -370,6 +375,7 @@ service cloud.firestore {
             && strLen(d.title, 1, 200)
             && strLen(d.body, 1, 10000)
             && validDate(d.date)
+            && d.date == postId[0:10]
             && d.author == author
             && validAlias(d.authorAlias)
             && d.authorAlias == me.data.get('alias', '')

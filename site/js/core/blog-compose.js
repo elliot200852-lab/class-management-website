@@ -73,11 +73,13 @@
     var list;
     var postId;
     try {
-      postId = store.newPostId();
+      // 規則要求 date == postId 的前 10 碼（DATA-MODEL §2.14）：同一個日期只算一次，跨午夜也不會對不上
+      var date = C.util.today();
+      postId = store.newPostId(date);
       list = ops({
         seat: input.seat,
         postId: postId,
-        date: C.util.today(),
+        date: date,
         author: author,
         authorAlias: roles.alias,
         title: input.title,

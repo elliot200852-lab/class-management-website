@@ -40,6 +40,31 @@
     return { state: 'loading', user: null, roles: C.emptyRoles() };
   };
 
+  /** 用 email 連結（sign_in_provider 是 'password'）登入的非導師：只能讀公開內容。
+      規則分不出 email 連結與「別人拿你的信箱預先註冊的密碼帳號」，所以留言、回條、私密內容一律要 Google（DATA-MODEL §1.1）。 */
+  C.READ_ONLY_LOGIN_MSG = '此登入方式只能閱讀，留言與私密內容請用 Google 登入。';
+  C.readOnlyLogin = function (session) {
+    return !!(session && session.state === 'ready' && session.user &&
+      session.user.provider !== 'google.com' && !(session.roles && session.roles.teacher));
+  };
+
+  /** 「這是共用電腦」：記在這個分頁的 sessionStorage。勾了＝登入只保留到關掉分頁、資料庫不寫進本機硬碟
+      （ARCHITECTURE §3.4）。storage 不能用時一律當沒勾（get 回 false）。 */
+  var SHARED_KEY = 'cmw-shared-device';
+  C.sharedDevice = {
+    KEY: SHARED_KEY,
+    get: function () {
+      try { return g.sessionStorage.getItem(SHARED_KEY) === '1'; } catch (e) { return false; }
+    },
+    set: function (on) {
+      try {
+        if (on) g.sessionStorage.setItem(SHARED_KEY, '1');
+        else g.sessionStorage.removeItem(SHARED_KEY);
+      } catch (e) { /* 忽略 */ }
+      return C.sharedDevice.get();
+    }
+  };
+
   /** 組一份 Doc；cursor 不可列舉（JSON 化、比較時不會帶到）。 */
   C.makeDoc = function (path, data, cursor) {
     var segs = String(path).split('/');

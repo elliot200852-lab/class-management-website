@@ -34,10 +34,10 @@ export const PID = 'a1b2c3d4e5f60718';   // 腳本寫的照片 pid（16 碼十�
 export const CATEGORY = '班級生活';
 
 // ── 角色 ────────────────────────────────────────────────────────────
-// 每張權限表的每一格都對這 14 個角色各跑一次（允許與拒絕兩面）。
+// 每張權限表的每一格都對這 15 個角色各跑一次（允許與拒絕兩面）。
 export const ROLES = [
   'anon', 'anonymous', 'outsider', 'unverified', 'removed', 'reader', 'inactive',
-  'parent', 'staff', 'private', 'emailLink', 'teacher', 'teacherUnverified', 'teacherLink',
+  'parent', 'staff', 'private', 'emailLink', 'linkPrivate', 'teacher', 'teacherUnverified', 'teacherLink',
 ];
 
 const LABELS = {
@@ -52,17 +52,19 @@ const LABELS = {
   staff: '同仁逐座號閱讀（01、03）',
   private: '私密讀者',
   emailLink: 'email 連結登入的名單者（對應座號 01）',
+  linkPrivate: 'password 登入、email 已驗證、在私密名單的帳號（預先註冊冒用）',
   teacher: '導師',
   teacherUnverified: 'email 未驗證的導師 email',
   teacherLink: 'email 連結登入的導師 email',
 };
 
 // 允許集合的簡寫（DATA-MODEL §0.7：座號家長、同仁、私密讀者一定也是讀者）
-export const R = ['reader', 'inactive', 'parent', 'staff', 'private', 'emailLink', 'teacherLink'];   // 班網讀者
+// password 登入（email 連結，或別人預先註冊的密碼帳號）只能當讀公開內容的讀者：私密讀取、留言、回條都要 Google（§1.1）。
+export const R = ['reader', 'inactive', 'parent', 'staff', 'private', 'emailLink', 'linkPrivate', 'teacherLink'];  // 班網讀者
 export const RT = [...R, 'teacher'];                                                                   // 讀者＋導師
-export const P = ['private', 'teacherLink'];                                                           // 私密讀者（非導師）
+export const P = ['private'];                                                                          // 私密讀者（非導師）
 export const PT = [...P, 'teacher'];
-export const WRITERS = ['reader', 'inactive', 'parent', 'staff', 'private', 'emailLink'];              // 能以自己身分留言／簽回條的讀者
+export const WRITERS = ['reader', 'inactive', 'parent', 'staff', 'private'];                           // 能以自己身分留言／簽回條的讀者
 export const T = ['teacher'];
 
 function tokenFor(spec) {
@@ -100,6 +102,10 @@ export function identities(teacher) {
     emailLink: { email: mail('link.parent'), key: mail('link.parent'), provider: 'password',
       allow: { kind: 'parent', alias: 'linkalias001' },
       map: { seats: ['01'], kind: 'parent', active: true, relation: '父', label: '座號 01 家長' } },
+    // H1：攻擊者用還沒登入過的家長信箱註冊密碼帳號、家長點了驗證信 → email_verified=true、sign_in_provider='password'。
+    // 那位家長在私密名單裡；這個帳號只准讀公開紀事，不准讀私密、不准留言、不准簽回條。
+    linkPrivate: { email: mail('prereg.parent'), key: mail('prereg.parent'), provider: 'password',
+      allow: { kind: 'parent', alias: 'preregalias1' }, private: true },
     teacher: { email: teacher.email, key: teacher.key,
       allow: { kind: 'teacher', alias: 'teacheralias' }, private: true },
     // 這兩個跟導師同一個信箱（同一份名單文件）；寫入時用導師的 kind 與代號去試，才是最強的冒用嘗試

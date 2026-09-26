@@ -60,7 +60,9 @@ export async function run(S, W) {
   await S.grid(W, 'create 座號 01（家長 author=parent、導師 author=teacher）', { allow: WRITERS_01 },
     (db, r) => setDoc(doc(db, `student_blogs/01/entries/${newPostId(r, '10')}`), entryFor(W, r)));
   await S.grid(W, 'create 座號 02', { allow: T },
-    (db, r) => setDoc(doc(db, `student_blogs/02/entries/${newPostId(r, '11')}`), entryFor(W, r)));
+    (db, r) => setDoc(doc(db, `student_blogs/02/entries/${newPostId(r, '11')}`), entryFor(W, r, { date: '2026-09-11' })));
+  await S.grid(W, 'create（date 跟 postId 前 10 碼不同：釘到未來）', {},
+    (db, r) => setDoc(doc(db, `student_blogs/01/entries/${newPostId(r, '12')}`), entryFor(W, r, { date: '2099-12-31' })));
   await S.grid(W, 'create（postId 格式不對）', {},
     (db, r) => setDoc(doc(db, `student_blogs/01/entries/post-${r.toLowerCase()}`), entryFor(W, r)));
   await S.grid(W, 'update（導師改標題）', { allow: T },

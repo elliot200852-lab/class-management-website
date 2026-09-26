@@ -266,6 +266,11 @@ class TestCloudEval(unittest.TestCase):
         self.assertFalse(cc.eval_auth(200, pw, "", 200, {"enabled": True}, "", "my-class-2026").ok)
         nod = dict(good, authorizedDomains=["localhost"])
         self.assertFalse(cc.eval_auth(200, nod, "", 200, {"enabled": True}, "", "my-class-2026").ok)
+        # 電子郵件連結是選用：整個沒開（老師決定只用 Google）不算失敗，detail 要註明
+        noemail = {"signIn": {"email": {"enabled": False}}, "authorizedDomains": good["authorizedDomains"]}
+        item = cc.eval_auth(200, noemail, "", 200, {"enabled": True}, "", "my-class-2026")
+        self.assertTrue(item.ok)
+        self.assertIn("選用", item.detail)
 
     def test_index_status(self):
         st = cc.index_status(LOCAL, remote("READY"), [])

@@ -9,6 +9,7 @@ import {
 import { assert } from '../lib/harness.mjs';
 import { AT, ENTRY, SLUG } from '../lib/world.mjs';
 import { commentFor } from './threads.mjs';
+import { entryFor } from './blogs.mjs';
 
 function mutants(vec) {
   return [
@@ -59,6 +60,40 @@ function mutants(vec) {
       replace: 'return verified() && emailKey() ==',
       label: 'email 連結登入的導師信箱讀名冊',
       probe: (W) => getDoc(doc(W.db('teacherLink'), 'roster', 'students')),
+      real: 'deny', mutant: 'allow',
+    },
+    {
+      name: '私密門票不必 Google 登入（H1）',
+      find: 'return isTeacher() || (isReader() && isGoogle()\n        && exists(',
+      replace: 'return isTeacher() || (isReader()\n        && exists(',
+      label: '預先註冊的密碼帳號（在私密名單）讀私密紀事',
+      probe: (W) => getDoc(doc(W.db('linkPrivate'), 'private_posts', SLUG.priv)),
+      real: 'deny', mutant: 'allow',
+    },
+    {
+      name: '留言不必 Google 登入（H1）',
+      find: 'return isGoogle()\n        && ((isTeacher() && parent != null)',
+      replace: 'return true\n        && ((isTeacher() && parent != null)',
+      label: 'email 連結登入的名單者在紀事底下留言',
+      probe: (W) => addDoc(collection(W.db('emailLink'), `posts/${SLUG.post}/comments`), commentFor(W, 'emailLink')),
+      real: 'deny', mutant: 'allow',
+    },
+    {
+      name: '回條不必 Google 登入（H1）',
+      find: '        && isGoogle()\n        && key == emailKey()\n',
+      replace: '        && key == emailKey()\n',
+      label: 'email 連結登入的名單者簽紀事回條',
+      probe: (W) => setDoc(doc(W.db('emailLink'), `posts/${SLUG.post2}/reads/${W.key('emailLink')}`),
+        { kind: 'parent', readAt: serverTimestamp() }),
+      real: 'deny', mutant: 'allow',
+    },
+    {
+      name: '部落格文章日期不綁 postId（L1）',
+      find: '            && d.date == postId[0:10]\n',
+      replace: '',
+      label: '座號家長把文章日期填到未來',
+      probe: (W) => setDoc(doc(W.db('parent'), 'student_blogs/01/entries/2026-09-20-canary01'),
+        entryFor(W, 'parent', { date: '2099-12-31' })),
       real: 'deny', mutant: 'allow',
     },
     {

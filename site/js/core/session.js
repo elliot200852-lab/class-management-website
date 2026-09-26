@@ -5,7 +5,9 @@
    · 在 LINE／Facebook／Instagram 這類 App 裡打開時不能用 Google 登入：畫面說明怎麼改用手機本身的瀏覽器；
      LINE 多給一顆按鈕，連到同一頁並加上 openExternalBrowser=1（LINE 認得這個參數，會離開 App、改用系統的瀏覽器打開）。
    · email 連結：Spark 方案全專案每天只能寄 5 封，額度用完照 errors.js 顯示白話說明。
-   · 登入了但帳號還沒開通：顯示目前登入的信箱、請他把這個信箱告訴老師，並提供登出換帳號的按鈕。 */
+   · 登入了但帳號還沒開通：顯示目前登入的信箱、請他把這個信箱告訴老師，並提供登出換帳號的按鈕。
+   · 「這是共用電腦」勾選（CMW.sharedDevice，記在這個分頁）：勾了＝登入只保留到關掉分頁、資料不留在這台電腦（ARCHITECTURE §3.4）。
+   · email 連結登入只能讀公開內容（留言、私密內容要 Google 登入，DATA-MODEL §1.1），寄信那一段先講清楚。 */
 (function (g) {
   'use strict';
   var C = g.CMW = g.CMW || {};
@@ -43,6 +45,18 @@
     var p = el('p', cls || 'gate-note', text);
     parent.appendChild(p);
     return p;
+  }
+
+  /** 「這是共用電腦」勾選框：要在按登入之前勾（登入後才勾就來不及了） */
+  function sharedToggle() {
+    var wrap = el('label', 'gate-shared');
+    var box = el('input', 'gate-shared-box');
+    box.type = 'checkbox';
+    box.id = 'gate-shared';
+    box.checked = C.sharedDevice.get();
+    box.addEventListener('change', function () { box.checked = C.sharedDevice.set(!!box.checked); });
+    C.dom.add(wrap, box, ' 這是共用電腦（學校、圖書館等）：關掉分頁就登出，不在這台電腦留下資料');
+    return wrap;
   }
 
   function emailForm(store, onDone, opts) {
@@ -95,6 +109,7 @@
 
     if (opts.needEmail) {
       note(box, '這個登入連結是在另一台裝置上打開的。安全起見，請再填一次收信用的信箱。');
+      box.appendChild(sharedToggle());
       box.appendChild(emailForm(store, function (v) {
         return store.completeSignInLink(v).then(function () { return '登入中…'; });
       }, { button: '確認並登入' }));
@@ -118,6 +133,7 @@
     var google = C.dom.button('btn btn--primary btn--google', '用 Google 帳號登入', null);
     var gmsg = el('p', 'form-msg');
     gmsg.setAttribute('aria-live', 'polite');
+    box.appendChild(sharedToggle());
     box.appendChild(google);
     box.appendChild(gmsg);
 
@@ -144,6 +160,7 @@
     var summary = el('summary', null, '沒有 Google 帳號？寄登入連結到信箱');
     more.appendChild(summary);
     note(more, '我們會寄一封信給你，點信裡的連結就登入了。一台裝置只需要登入一次。');
+    note(more, '用信箱連結登入只能閱讀：留言、已讀回條、私密內容與「我的孩子」都要用 Google 帳號登入。');
     more.appendChild(emailForm(store, function (v) {
       return store.sendSignInLink(v).then(function () {
         return '登入連結已經寄出。請到信箱點信裡的連結（沒看到的話，找找垃圾郵件匣）。';

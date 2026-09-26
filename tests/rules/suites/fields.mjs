@@ -65,7 +65,7 @@ export async function run(S, W) {
   await S.expect('deny', 'readAt 用瀏覽器自己的時間', () => rc('parent', { kind: 'parent', readAt: CLIENT_TIME }));
   await S.expect('deny', 'kind 跟名單不符（家長填 staff）', () => rc('parent', { kind: 'staff', readAt: serverTimestamp() }));
   await S.expect('deny', 'kind 填 teacher', () => rc('private', { kind: 'teacher', readAt: serverTimestamp() }));
-  await S.expect('deny', 'doc id 用大寫寫法（不是自己的 email 鍵）', () => rc('emailLink', rbase, W.key('emailLink').toUpperCase()));
+  await S.expect('deny', 'doc id 用大寫寫法（不是自己的 email 鍵）', () => rc('reader', rbase, W.key('reader').toUpperCase()));
 
   S.section('欄位白名單：部落格文章（§2.14）');
   await W.reset();
@@ -75,7 +75,7 @@ export async function run(S, W) {
     n += 1;
     return setDoc(doc(pdb, `student_blogs/${seat}/entries/2026-09-20-f${String(n).padStart(7, '0')}`), data);
   };
-  const ebase = entryFor(W, 'parent');
+  const ebase = entryFor(W, 'parent', { date: '2026-09-20' });   // date 必須等於 postId 前 10 碼
   const ph = (i, extra = {}) => ({ pid: String(i), w: 1280, h: 960, ...extra });
   await S.expect('allow', '合法基準（座號家長，沒有照片）', () => addE(ebase));
   await S.expect('allow', '三張照片、帶圖說', () => addE({ ...ebase, photos: [ph(0, { caption: '圖說' }), ph(1), ph(2)] }));
@@ -89,6 +89,8 @@ export async function run(S, W) {
   await S.expect('deny', 'title 201 字', () => addE({ ...ebase, title: 't'.repeat(201) }));
   await S.expect('deny', 'body 10001 字', () => addE({ ...ebase, body: 'b'.repeat(10001) }));
   await S.expect('deny', 'date 格式不對', () => addE({ ...ebase, date: '2026/09/10' }));
+  await S.expect('deny', 'date 跟 postId 前 10 碼不同（填到未來）', () => addE({ ...ebase, date: '2099-01-01' }));
+  await S.expect('deny', 'date 跟 postId 前 10 碼不同（格式對、差一天）', () => addE({ ...ebase, date: '2026-09-21' }));
   await S.expect('deny', '家長填 author=teacher', () => addE({ ...ebase, author: 'teacher' }));
   await S.expect('deny', 'authorAlias 冒用導師的代號', () => addE({ ...ebase, authorAlias: W.alias('teacher') }));
   await S.expect('deny', '建立時 visible=false', () => addE({ ...ebase, visible: false }));

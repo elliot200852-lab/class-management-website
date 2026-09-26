@@ -142,6 +142,10 @@
   function home(ctx) {
     if (isTeacher(ctx)) return C.myChild.admin(ctx);
     var seats = mySeats(ctx);
+    if (!seats.length && C.readOnlyLogin(ctx.session)) {
+      return notice(ctx, C.READ_ONLY_LOGIN_MSG + '「我的孩子」只給對應到孩子座號、用 Google 帳號登入的家長。',
+        C.route.href('home'), '回首頁');
+    }
     if (!seats.length) {
       return notice(ctx, '「我的孩子」只給對應到孩子座號的家長，而且要用 Google 帳號登入。' +
         '如果你是家長卻看到這一句，請把目前登入的信箱（頁尾看得到）傳給老師。', C.route.href('home'), '回首頁');

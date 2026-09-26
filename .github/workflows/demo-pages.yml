@@ -8,10 +8,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 預設只給讀；寫 Pages 的權限只給 deploy 那個 job（組站的 job 拿不到）。
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: demo-pages
@@ -19,23 +18,26 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: 組示範站
         run: python scripts/build_site.py --demo --out build/demo
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: build/demo
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

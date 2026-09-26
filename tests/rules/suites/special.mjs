@@ -8,6 +8,7 @@ import {
 import { assert } from '../lib/harness.mjs';
 import { AT, ENTRY, SLUG } from '../lib/world.mjs';
 import { blogCommentFor, entryFor, IMAGE, THUMB } from './blogs.mjs';
+import { commentFor } from './threads.mjs';
 
 const google = (email, extra = {}) => ({ email, verified: true, provider: 'google.com', ...extra });
 
@@ -112,7 +113,7 @@ export async function run(S, W, { repoRoot }) {
   await S.expect('deny', '撤之後：對話串被拒',
     () => getDocs(query(collection(pdb, `${entryPath}/blog_comments`), where('status', '==', 'visible'))));
   await S.expect('deny', '撤之後：發文被拒',
-    () => setDoc(doc(pdb, 'student_blogs/01/entries/2026-09-22-revoked1'), entryFor(W, 'parent')));
+    () => setDoc(doc(pdb, 'student_blogs/01/entries/2026-09-22-revoked1'), entryFor(W, 'parent', { date: '2026-09-22' })));
   await S.expect('deny', '撤之後：對話被拒',
     () => setDoc(doc(pdb, `${entryPath}/blog_comments/x1`), blogCommentFor(W, 'parent')));
   await S.expect('deny', '撤之後：班網一般頁也被拒', () => getDoc(doc(pdb, 'config', 'site')));
@@ -137,6 +138,7 @@ export async function run(S, W, { repoRoot }) {
     const b = writeBatch(db);
     const base = `student_blogs/${seat}/entries/${postId}`;
     b.set(doc(db, base), entryFor(W, author, {
+      date: postId.slice(0, 10),
       photos: [0, 1, 2].map((k) => ({ pid: String(k), w: 1280, h: 960, caption: `第 ${k + 1} 張` })),
     }));
     for (const k of [0, 1, 2]) {
@@ -162,4 +164,32 @@ export async function run(S, W, { repoRoot }) {
   await S.expect('allow', '導師對任何座號送批次（座號 02）', () => batchFor(W.db('teacher'), '02', '2026-09-23-batch007', 'teacher'));
   await S.expect('found', '批次寫完，座號家長讀得到自己那篇的第 3 張顯示圖',
     () => getDoc(doc(pdb, `student_blogs/01/entries/${P1}/images/2`)));
+
+  // H1：規則分不出 email 連結與密碼登入（兩者 sign_in_provider 都是 'password'）。任何人都能拿一位還沒登入過的家長信箱
+  // 預先註冊密碼帳號，家長點了驗證信，這個帳號就 email_verified=true。所以 password 登入只給「讀公開內容」。
+  S.section('預先註冊的密碼帳號（§1.1：password 登入只能讀公開內容）');
+  await W.reset();
+  const ldb = W.db('linkPrivate');
+  await S.expect('found', 'password 登入、已驗證、在名單：讀得到公開紀事', () => getDoc(doc(ldb, 'posts', SLUG.post)));
+  await S.expect('found', '同上：讀得到公開紀事正文', () => getDoc(doc(ldb, `posts/${SLUG.post}/content/main`)));
+  await S.expect('found', '同上：讀得到相簿', () => getDoc(doc(ldb, 'albums', SLUG.album)));
+  await S.expect('deny', '在私密名單也讀不到私密紀事', () => getDoc(doc(ldb, 'private_posts', SLUG.priv)));
+  await S.expect('deny', '查私密紀事列表被拒',
+    () => getDocs(query(collection(ldb, 'private_posts'), where('visible', '==', true))));
+  await S.expect('deny', '不能在公開紀事留言（用自己名單上的 kind 與代號）',
+    () => setDoc(doc(ldb, `posts/${SLUG.post}/comments/prereg1`), commentFor(W, 'linkPrivate')));
+  await S.expect('deny', '不能在相簿留言', () => setDoc(doc(ldb, `albums/${SLUG.album}/comments/prereg2`), commentFor(W, 'linkPrivate')));
+  await S.expect('deny', '不能在私密紀事留言',
+    () => setDoc(doc(ldb, `private_posts/${SLUG.priv}/comments/prereg3`), commentFor(W, 'linkPrivate')));
+  await S.expect('deny', '不能簽公開紀事的已讀回條',
+    () => setDoc(doc(ldb, `posts/${SLUG.post2}/reads/${W.key('linkPrivate')}`), { kind: 'parent', readAt: serverTimestamp() }));
+  await S.expect('deny', '不能簽私密紀事的已讀回條',
+    () => setDoc(doc(ldb, `private_posts/${SLUG.priv2}/reads/${W.key('linkPrivate')}`), { kind: 'parent', readAt: serverTimestamp() }));
+  // 同一個信箱改用 Google 登入（Google 帳號是本人的）就恢復全部權限
+  const gdb = W.dbFor('prereg-google', google(W.key('linkPrivate')));
+  await S.expect('found', '同一信箱改用 Google 登入：私密紀事讀得到', () => getDoc(doc(gdb, 'private_posts', SLUG.priv)));
+  await S.expect('allow', '同一信箱改用 Google 登入：可以留言',
+    () => setDoc(doc(gdb, `posts/${SLUG.post}/comments/prereg4`), commentFor(W, 'linkPrivate')));
+  await S.expect('allow', '同一信箱改用 Google 登入：可以簽回條',
+    () => setDoc(doc(gdb, `posts/${SLUG.post2}/reads/${W.key('linkPrivate')}`), { kind: 'parent', readAt: serverTimestamp() }));
 }

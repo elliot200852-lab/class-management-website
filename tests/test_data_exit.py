@@ -3,6 +3,7 @@
 """資料退場（scripts/data_exit.py）不連網的部分：本機名單檔沒改好就停、計畫檔與輸出遮信箱。
 刪資料的完整流程（轉出、家長刪除、學年結束）在模擬器整合測試（tests/emulator_backup.py）。"""
 import io
+import os
 import sys
 import shutil
 import tempfile
@@ -62,6 +63,58 @@ class TestGates(unittest.TestCase):
         with redirect_stdout(buf):
             de.show(p)
         self.assertNotIn(fx.parent_mail(0), buf.getvalue())
+
+    def test_remove_path_reads_back(self):
+        d = self.tmp / "sync" / "04_部落格歸檔" / "05"
+        (d / "2026").mkdir(parents=True)
+        (d / "2026" / "a.md").write_text("x", encoding="utf-8")
+        (d / "b.jpg").write_bytes(b"1")
+        self.assertEqual(de.remove_path(d), [])
+        self.assertFalse(d.exists())
+        self.assertEqual(de.remove_path(d), [], "已經不在＝刪好了")
+        f = self.tmp / "one.jpg"
+        f.write_bytes(b"1")
+        self.assertEqual(de.remove_path(f), [])
+        self.assertFalse(f.exists())
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "用唯讀資料夾模擬「檔案被鎖住」：Windows 與 root 做不出來")
+    def test_locked_folder_is_reported_not_swallowed(self):
+        d = self.tmp / "sync" / "學生個別資料" / "05"
+        locked = d / "照片"
+        locked.mkdir(parents=True)
+        (locked / "a.jpg").write_bytes(b"1")
+        (d / "b.md").write_text("x", encoding="utf-8")
+        os.chmod(str(locked), 0o500)
+        try:
+            p = de.Plan("測試")
+            p.sync = [d]
+            gone, failed = de.execute(None, p, [])
+            self.assertTrue(d.exists())
+            self.assertFalse((d / "b.md").exists(), "刪得掉的照樣刪")
+            self.assertEqual(failed, [str(locked / "a.jpg")], "刪不掉的列出來，不假裝刪好了")
+        finally:
+            os.chmod(str(locked), 0o700)
+
+    def test_orphan_photos_of_seat(self):
+        from lib import fsbackup as fsb
+        from lib import firestore_rest as fr
+        e = "student_blogs/05/entries/2026-10-05-abcdefgh"
+
+        class C(object):
+            def list_docs(self, coll, mask=None):
+                assert coll == "student_blogs/05/entries" and mask == ["photos"]
+                return [fr.Doc(e, {"photos": [{"pid": "0", "w": 2, "h": 2}]})]
+
+        class W(object):
+            def walk(self, roots=None, names_only=False):
+                assert roots == ["student_blogs/05/entries"] and names_only
+                ex = fsb.Export()
+                ex.photos = [{"path": e + "/images/0"}, {"path": e + "/thumbs/2"},
+                             {"path": "student_blogs/05/entries/2026-10-09-nopostxx/images/0"}]
+                return ex
+        self.assertEqual(de.orphan_photos_of_seat(C(), W(), "05"),
+                         [e + "/thumbs/2", "student_blogs/05/entries/2026-10-09-nopostxx/images/0"])
 
     def test_needs_subcommand(self):
         with redirect_stdout(io.StringIO()):

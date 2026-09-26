@@ -11,10 +11,12 @@
   var C = g.CMW = g.CMW || {};
   var el = function (t, c, x) { return C.dom.el(t, c, x); };
 
-  function onlyForPrivate(main) {
+  function onlyForPrivate(main, session) {
     var box = el('div', 'container container--narrow');
     var n = el('div', 'notice');
     n.appendChild(el('p', null, '這一頁只給私密名單裡的家長與老師。'));
+    // email 連結登入：就算在私密名單，規則也不放行（DATA-MODEL §1.1），講清楚要改用 Google 登入
+    if (C.readOnlyLogin(session)) n.appendChild(el('p', null, C.READ_ONLY_LOGIN_MSG));
     n.appendChild(C.dom.link(C.route.href('blog'), 'section-link', '回班級紀事'));
     box.appendChild(n);
     main.appendChild(box);
@@ -142,7 +144,7 @@
 
   C.views['private'] = function (ctx) {
     var r = ctx.session.roles;
-    if (!r.teacher && !r.privateReader) { onlyForPrivate(ctx.main); return null; }
+    if (!r.teacher && !r.privateReader) { onlyForPrivate(ctx.main, ctx.session); return null; }
     var slug = ctx.params.get('p');
     if (slug) return single(ctx, slug);
     return list(ctx);

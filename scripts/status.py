@@ -16,6 +16,7 @@
   · data/inbox/ 有幾個檔等著歸檔；data/inbox/.archived/ 有沒有要清的
   · 名單檔（roster.csv、contacts.csv、parent-roles.yaml）在上次名單同步之後有沒有改過
   · 資料庫容量估算（上一份備份的照片與文件大小，對照免費方案 1 GiB；70% 以上提醒）
+  · 上一份資料庫備份對帳出來的孤兒照片（學生部落格底下沒掛在文章上的照片文件）
   · Pillow、gcloud、firebase 有沒有裝
 
 用法：
@@ -131,6 +132,17 @@ def capacity_item(est_bytes, snap_id=""):
     return item(OK, text)
 
 
+def orphan_item(summary, snap_id=""):
+    """上一份資料庫備份對帳出來的孤兒照片（backup.py firestore 記在 backup-state.json）；沒有或 0 份回 None。"""
+    if not isinstance(summary, dict) or not summary.get("count"):
+        return None
+    seats = summary.get("seats") or {}
+    where = "、".join("座號 %s %d 份" % (k, (seats[k] or {}).get("count", 0)) for k in sorted(seats))
+    return item(WARN, "孤兒照片 %d 份、約 %s（%s；依 %s 那份備份）：學生部落格底下有照片沒掛在任何文章上，網頁看不到、只佔容量"
+                % (summary["count"], human_size(summary.get("bytes") or 0), where or "座號不明", snap_id or "最近一份"),
+                "正常使用不會出現，多半是有人繞過網頁直接寫；照劇本的「孤兒照片」一節處理", "playbooks/data-exit.md")
+
+
 def tools_items(have_pillow, have_gcloud, have_firebase):
     out = []
     for ok, name, why in ((have_pillow, "Pillow", "處理照片（紀事、相簿、部落格照片）"),
@@ -229,6 +241,9 @@ def collect(now=None):
         snap_id = fs_state["snapshot"]
         est = estimate_bytes(data / "backups" / "firestore" / snap_id)
     out.append(capacity_item(est, snap_id))
+    orph = orphan_item(fs_state.get("orphans"), snap_id)
+    if orph:
+        out.append(orph)
     out += tools_items(images.have_pillow(), bool(hostos.find_exe_all("gcloud")), bool(hostos.find_exe_all("firebase")))
     return out
 

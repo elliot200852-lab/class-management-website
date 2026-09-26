@@ -6,7 +6,7 @@ import { RT, T } from '../lib/world.mjs';
 
 export async function run(S, W) {
   const NEW = { kind: 'parent', alias: 'newalias0001', updatedAt: serverTimestamp() };
-  const HAS_ALLOW = ['reader', 'inactive', 'parent', 'staff', 'private', 'emailLink', 'teacher', 'teacherLink'];
+  const HAS_ALLOW = ['reader', 'inactive', 'parent', 'staff', 'private', 'emailLink', 'linkPrivate', 'teacher', 'teacherLink'];
 
   S.section('名單：allowlist（§2.1）');
   await W.reset();
@@ -23,7 +23,7 @@ export async function run(S, W) {
   S.section('名單：private_allowlist（§2.2）');
   await W.reset();
   await S.grid(W, 'get 自己那份',
-    { found: ['private', 'teacher', 'teacherLink'], notfound: ['outsider', 'removed', 'reader', 'inactive', 'parent', 'staff', 'emailLink'] },
+    { found: ['private', 'linkPrivate', 'teacher', 'teacherLink'], notfound: ['outsider', 'removed', 'reader', 'inactive', 'parent', 'staff', 'emailLink'] },
     (db, r) => getDoc(doc(db, 'private_allowlist', W.keyOf(r))));
   await S.grid(W, 'get 別人那份（私密讀者的）', { found: T },
     (db, r) => getDoc(doc(db, 'private_allowlist', r === 'private' ? W.key('teacher') : W.key('private'))));

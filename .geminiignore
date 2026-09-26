@@ -7,6 +7,9 @@ data/backups/**
 # 孩子與家長的照片（v1.1 個人照、家長合照）：代理只跑腳本、看腳本印的座號，不打開照片
 data/personal-photos/**
 data/parent-photos/**
+# teacher-records-kit 的學生觀察與課程紀錄（捷徑或資料夾）；名單同步記下的「email 鍵 → 作者代號」對照
+data/records/**
+data/ledgers/alias-history.jsonl
 # 預覽檔與匯出檔（紀事、部落格、個人照的預覽頁有孩子的照片與稱呼；家長信的全文；資料退場要刪的登入帳號完整信箱）：
 # 腳本自己讀寫、印摘要，老師自己打開看；代理不打開
 exports/**

@@ -66,6 +66,31 @@ class TestPure(unittest.TestCase):
         self.assertEqual(status.capacity_item(int(gib * 0.70) + 1)["level"], status.WARN)
         self.assertEqual(status.capacity_item(int(gib * 0.95))["level"], status.URGENT)
 
+    def test_orphans(self):
+        self.assertIsNone(status.orphan_item(None))
+        self.assertIsNone(status.orphan_item({"count": 0, "bytes": 0, "seats": {}}))
+        it = status.orphan_item({"count": 3, "bytes": 3 * 1024 * 1024,
+                                 "seats": {"05": {"count": 2, "bytes": 1, "posts": ["2026-10-05-a***"]},
+                                           "07": {"count": 1, "bytes": 1, "posts": []}}}, "20261001-120000")
+        self.assertEqual(it["level"], status.WARN)
+        self.assertIn("座號 05 2 份", it["title"])
+        self.assertIn("座號 07 1 份", it["title"])
+        self.assertEqual(it["playbook"], "playbooks/data-exit.md")
+
+    def test_orphans_shown_from_last_backup(self):
+        tmp = Path(tempfile.mkdtemp(prefix="cmw-st-o-"))
+        try:
+            root = fx.make_root(tmp / "root", photos=False, n=3)
+            paths.set_root(root)
+            ledgers.mark_ok("firestore", snapshot="20261001-120000",
+                            orphans={"count": 4, "bytes": 2048, "seats": {"05": {"count": 4, "bytes": 2048, "posts": []}}})
+            with mock.patch.object(status.hostos, "find_exe_all", return_value=[("/x", True)]):
+                items = status.collect(NOW)
+            self.assertTrue(any("孤兒照片 4 份" in i["title"] for i in items))
+        finally:
+            paths.reset_root()
+            shutil.rmtree(str(tmp), ignore_errors=True)
+
     def test_tools(self):
         self.assertEqual([i["level"] for i in status.tools_items(True, True, True)], [status.OK])
         miss = status.tools_items(False, True, False)

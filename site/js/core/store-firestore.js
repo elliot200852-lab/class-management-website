@@ -13,6 +13,8 @@
   var SESSION_CACHE_KEY = 'cmw-session-v2';
   var SESSION_TTL_MS = 30 * 60 * 1000;
   var EMAIL_FOR_LINK_KEY = 'cmw-signin-email';
+  // 寄登入連結時勾了「共用電腦」：點信裡的連結通常開在新分頁（sessionStorage 不共用），先記在 localStorage 帶過去，完成登入就刪
+  var SHARED_FOR_LINK_KEY = 'cmw-signin-shared';
   var B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
   function ssGet(k) { try { return g.sessionStorage.getItem(k); } catch (e) { return null; } }
@@ -32,12 +34,30 @@
     this._session = C.loadingSession();
     this._subs = [];
     this._photoMemo = {};
+    this._serverOk = {};      // 這一頁從伺服器讀成功（規則放行）的文件路徑：照片快取命中後要看主人文件在不在這裡
+    this._ownerCheck = {};
     this._authStarted = false;
+    this._cacheMode = null;   // 'persistent'（IndexedDB）或 'memory'（共用電腦）
+  }
+
+  /** ID token 的 claims → 'google.com' 或 'emailLink'。與規則的 isGoogle() 同一個來源（firebase.sign_in_provider），
+      不看 providerData（同一信箱連結了 Google 與 email 連結時，providerData 有 google.com，但這次可能是用 email 連結登入的）。 */
+  function providerOf(claims) {
+    var fb = claims && typeof claims === 'object' ? claims.firebase : null;
+    return fb && fb.sign_in_provider === 'google.com' ? 'google.com' : 'emailLink';
+  }
+
+  /** 主人文件從伺服器讀成功（exists 而且不是快取）就記下來 */
+  function markServer(store, snaps) {
+    snaps.forEach(function (snap) {
+      if (snap && snap.exists() && snap.metadata && snap.metadata.fromCache === false) store._serverOk[snap.ref.path] = true;
+    });
   }
 
   /** 載入 SDK 並初始化（只做一次）。載不到（外掛擋住、網路斷）→ StoreError('unavailable')。 */
   FirestoreStore.prototype._ready = function () {
     if (this._sdk) return this._sdk;
+    var self = this;
     var cfg = this._cfg;
     var fb = cfg.firebase || {};
     this._sdk = Promise.all([
@@ -56,13 +76,20 @@
         messagingSenderId: fb.messagingSenderId
       });
       var db;
+      // 共用電腦：資料庫快取只放記憶體，關掉分頁就沒了
+      var shared = C.sharedDevice.get();
       try {
         // IndexedDB 不能用（私密視窗、被封鎖）時 SDK 會自己退回記憶體快取；這裡再多包一層保險
-        db = F.initializeFirestore(app, { localCache: F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() }) });
+        db = F.initializeFirestore(app, { localCache: shared ? F.memoryLocalCache()
+          : F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() }) });
+        self._cacheMode = shared ? 'memory' : 'persistent';
       } catch (e) {
         db = F.initializeFirestore(app, { localCache: F.memoryLocalCache() });
+        self._cacheMode = 'memory';
       }
       var auth = AU.getAuth(app);
+      // 登入狀態：共用電腦只保留到關掉分頁（預設是本機永久保存）。SDK 會把它排在之後的登入動作前面。
+      if (shared) AU.setPersistence(auth, AU.browserSessionPersistence).catch(function () { /* 設不了就維持預設 */ });
       if (cfg.emulator === true) {
         AU.connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
         F.connectFirestoreEmulator(db, '127.0.0.1', 8080);
@@ -154,8 +181,19 @@
           self._emit({ state: 'signed-out', user: null, roles: C.emptyRoles() });
           return;
         }
-        self._resolveSession(sdk, user).then(function (s) { self._emit(s); }, function (err) {
-          self._emit({ state: 'denied', user: self._userOf(user), roles: C.emptyRoles(), error: C.errors.from(err) });
+        if (self._cacheMode === 'restarting') return;
+        // 共用電腦卻還開著 IndexedDB 快取（例如在另一個分頁點登入信）→ 換成記憶體快取再進站
+        if (C.sharedDevice.get() && self._restartInMemory(sdk)) return;
+        self._resolveSession(sdk, user).then(function (s) {
+          if (self._cacheMode === 'restarting') return;
+          // 導師：登入一律只保留到關掉分頁（別人接著用這台電腦，不會直接是導師）。SDK 會把已登入的帳號搬過去，不用重新登入。
+          // 資料庫快取不跟著換成記憶體（要換得重新載入）：共用電腦請在登入閘勾「這是共用電腦」，或用完按登出（會清快取）。
+          if (s.roles && s.roles.teacher) {
+            sdk.AU.setPersistence(sdk.auth, sdk.AU.browserSessionPersistence).catch(function () { /* 維持預設 */ });
+          }
+          self._emit(s);
+        }, function (err) {
+          self._emit({ state: 'denied', user: self._userOf(user, 'emailLink'), roles: C.emptyRoles(), error: C.errors.from(err) });
         });
       });
     }, function (err) {
@@ -163,24 +201,47 @@
     });
   };
 
-  FirestoreStore.prototype._userOf = function (user) {
-    var key = null;
-    try { key = C.emailKey(user.email || ''); } catch (e) { key = null; }
-    var provider = 'emailLink';
-    (user.providerData || []).forEach(function (p) { if (p && p.providerId === 'google.com') provider = 'google.com'; });
-    return { uid: user.uid, email: user.email || '', emailKey: key, provider: provider };
+  /** 共用電腦：登入改成只保留到關掉分頁，清掉本機的資料庫快取，重新載入（下次載入改用記憶體快取）。
+      已經是記憶體快取、或 sessionStorage 不能用（記不住就會一直重新載入）→ 不做，回 false。 */
+  FirestoreStore.prototype._restartInMemory = function (sdk) {
+    if (this._cacheMode !== 'persistent' || !C.sharedDevice.get()) return false;
+    this._cacheMode = 'restarting';
+    sdk.AU.setPersistence(sdk.auth, sdk.AU.browserSessionPersistence)
+      .then(function () { return sdk.F.terminate(sdk.db); })
+      .then(function () { return sdk.F.clearIndexedDbPersistence(sdk.db); })
+      .catch(function () { /* 別的分頁還開著就清不掉；登出時會再清一次 */ })
+      .then(function () { g.location.reload(); });
+    return true;
   };
 
-  /** 登入後平行讀四份（DATA-MODEL §1.2）→ Session。結果在同一分頁暫存 30 分鐘。 */
+  FirestoreStore.prototype._userOf = function (user, provider) {
+    var key = null;
+    try { key = C.emailKey(user.email || ''); } catch (e) { key = null; }
+    return { uid: user.uid, email: user.email || '', emailKey: key, provider: provider === 'google.com' ? 'google.com' : 'emailLink' };
+  };
+
+  /** 登入後平行讀四份（DATA-MODEL §1.2）→ Session。結果在同一分頁暫存 30 分鐘。
+      登入方式從 ID token 的 sign_in_provider 讀（與規則同源）；讀不到就當 email 連結（只能讀公開內容）。 */
   FirestoreStore.prototype._resolveSession = function (sdk, user) {
+    var self = this;
+    var tokenResult = typeof user.getIdTokenResult === 'function'
+      ? Promise.resolve().then(function () { return user.getIdTokenResult(); }).catch(function () { return null; })
+      : Promise.resolve(null);
+    return tokenResult.then(function (t) {
+      return self._resolveRoles(sdk, user, providerOf(t && t.claims));
+    });
+  };
+
+  FirestoreStore.prototype._resolveRoles = function (sdk, user, provider) {
     var F = sdk.F;
-    var u = this._userOf(user);
+    var u = this._userOf(user, provider);
     if (!u.emailKey || user.emailVerified === false) {
       return Promise.resolve({ state: 'denied', user: u, roles: C.emptyRoles() });
     }
     try {
       var cached = JSON.parse(ssGet(SESSION_CACHE_KEY) || 'null');
-      if (cached && cached.uid === u.uid && Date.now() - cached.at < SESSION_TTL_MS && cached.session) {
+      if (cached && cached.uid === u.uid && cached.provider === u.provider &&
+          Date.now() - cached.at < SESSION_TTL_MS && cached.session) {
         return Promise.resolve(cached.session);
       }
     } catch (e) { /* 暫存壞了就重讀 */ }
@@ -194,10 +255,11 @@
       // 探針：放行（文件不存在也算）＝true，被拒＝false
       return F.getDoc(F.doc(sdk.db, path)).then(function () { return true; }, function () { return false; });
     }
+    // 私密門票、座號、導師都要 Google 登入（規則同樣要求）；email 連結登入不發這三個請求
     var isGoogle = u.provider === 'google.com';
     return Promise.all([
       getOrNull(C.paths.allow(u.emailKey)).catch(function () { return null; }),
-      getOrNull(C.paths.privateAllow(u.emailKey)).catch(function () { return null; }),
+      isGoogle ? getOrNull(C.paths.privateAllow(u.emailKey)).catch(function () { return null; }) : Promise.resolve(null),
       isGoogle ? getOrNull(C.paths.parentMap(u.emailKey)).catch(function () { return null; }) : Promise.resolve(null),
       isGoogle ? allowedOrFalse(C.paths.teacherProbe()) : Promise.resolve(false)
     ]).then(function (r) {
@@ -213,14 +275,14 @@
         roles: {
           teacher: teacher,
           reader: !!allow,
-          privateReader: teacher || (!!allow && !!priv),
+          privateReader: teacher || (isGoogle && !!allow && !!priv),
           kind: allow ? allow.kind || null : (teacher ? 'teacher' : null),
           alias: allow ? allow.alias || null : null,
           seats: seats,
           seatKind: seats.length && map ? map.kind : null
         }
       };
-      ssSet(SESSION_CACHE_KEY, JSON.stringify({ uid: u.uid, at: Date.now(), session: s }));
+      ssSet(SESSION_CACHE_KEY, JSON.stringify({ uid: u.uid, provider: u.provider, at: Date.now(), session: s }));
       return s;
     });
   };
@@ -243,6 +305,8 @@
   /** Google 登入：先開小視窗；被擋就改用整頁轉址（同網域，ARCHITECTURE §3.4）。 */
   FirestoreStore.prototype.signInWithGoogle = function () {
     return this._ready().then(function (sdk) {
+      // 登入閘上剛勾了「共用電腦」：SDK 會把這個排在登入結果寫入之前（不 await，免得小視窗被瀏覽器當成非使用者觸發而擋掉）
+      if (C.sharedDevice.get()) sdk.AU.setPersistence(sdk.auth, sdk.AU.browserSessionPersistence).catch(function () { /* 維持預設 */ });
       var provider = new sdk.AU.GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       return sdk.AU.signInWithPopup(sdk.auth, provider).then(function () { return undefined; }, function (err) {
@@ -268,6 +332,8 @@
         handleCodeInApp: true
       }).then(function () {
         lsSet(EMAIL_FOR_LINK_KEY, String(email).trim());
+        if (C.sharedDevice.get()) lsSet(SHARED_FOR_LINK_KEY, '1');
+        else lsDel(SHARED_FOR_LINK_KEY);
         return key;
       }, function (err) { throw C.errors.from(err); });
     });
@@ -280,8 +346,15 @@
       if (!sdk.AU.isSignInWithEmailLink(sdk.auth, href)) return false;
       var addr = email || lsGet(EMAIL_FOR_LINK_KEY);
       if (!addr) throw new C.StoreError('invalid', 'need-email');
-      return sdk.AU.signInWithEmailLink(sdk.auth, String(addr).trim(), href).then(function () {
+      var shared = lsGet(SHARED_FOR_LINK_KEY) === '1' || C.sharedDevice.get();
+      var persist = shared && C.sharedDevice.set(true)
+        ? sdk.AU.setPersistence(sdk.auth, sdk.AU.browserSessionPersistence).catch(function () { /* 維持預設 */ })
+        : Promise.resolve();
+      return persist.then(function () {
+        return sdk.AU.signInWithEmailLink(sdk.auth, String(addr).trim(), href);
+      }).then(function () {
         lsDel(EMAIL_FOR_LINK_KEY);
+        lsDel(SHARED_FOR_LINK_KEY);
         try {
           var clean = new URL(href);
           ['apiKey', 'oobCode', 'mode', 'lang', 'continueUrl', 'tenantId'].forEach(function (k) { clean.searchParams.delete(k); });
@@ -307,8 +380,10 @@
   // ── B. 通用讀取 ────────────────────────────────────
   FirestoreStore.prototype.get = function (path) {
     if (!C.paths.isDocPath(path)) return Promise.reject(invalid('文件路徑不對'));
+    var self = this;
     return this._ready().then(function (sdk) {
       return sdk.F.getDoc(sdk.F.doc(sdk.db, path)).then(function (snap) {
+        markServer(self, [snap]);
         return snap.exists() ? snapToDoc(snap) : null;
       }, function (err) { throw C.errors.from(err); });
     });
@@ -319,7 +394,7 @@
     return this._ready().then(function (sdk) {
       var b = self._buildQuery(sdk, name, params, page, false);
       if (b.spec.count) throw invalid('這個查詢只能用 count：' + name);
-      return sdk.F.getDocs(b.q).then(function (snap) { return toPage(snap, b.spec, b.limit); },
+      return sdk.F.getDocs(b.q).then(function (snap) { markServer(self, snap.docs); return toPage(snap, b.spec, b.limit); },
         function (err) { throw C.errors.from(err); });
     }).catch(function (err) { throw C.errors.from(err); });
   };
@@ -332,7 +407,7 @@
     this._ready().then(function (sdk) {
       if (stopped) return;
       var b = self._buildQuery(sdk, name, params, null, false);
-      unsub = sdk.F.onSnapshot(b.q, function (snap) { cb(toPage(snap, b.spec, b.limit)); },
+      unsub = sdk.F.onSnapshot(b.q, function (snap) { markServer(self, snap.docs); cb(toPage(snap, b.spec, b.limit)); },
         function (err) { cb(null, C.errors.from(err)); });
     }).catch(function (err) { cb(null, C.errors.from(err)); });
     return function () {
@@ -393,7 +468,21 @@
   };
 
   // ── D. 語意方法 ────────────────────────────────────
-  /** 照片文件不可變：先查本機快取、沒有才上網；驗 base64 字元集；MIME 寫死 image/jpeg。 */
+  /** 主人文件這一頁有沒有從伺服器讀成功過（規則放行＝還有權限、而且還沒下架）。沒有就問伺服器一次（同一頁記住結果）。 */
+  FirestoreStore.prototype._ownerVerified = function (sdk, ownerPath) {
+    if (this._serverOk[ownerPath]) return Promise.resolve(true);
+    if (this._ownerCheck[ownerPath]) return this._ownerCheck[ownerPath];
+    var self = this;
+    this._ownerCheck[ownerPath] = sdk.F.getDocFromServer(sdk.F.doc(sdk.db, ownerPath)).then(function (snap) {
+      if (!snap.exists()) return false;
+      self._serverOk[ownerPath] = true;
+      return true;
+    }, function () { return false; });
+    return this._ownerCheck[ownerPath];
+  };
+
+  /** 照片文件不可變：先查本機快取、沒有才上網；驗 base64 字元集；MIME 寫死 image/jpeg。
+      快取命中時，主人文件要在這一頁從伺服器讀成功過才顯示（被撤權限、已下架的，快取裡的照片不再吐出來）。 */
   FirestoreStore.prototype.photoSrc = function (ownerPath, pid, size) {
     var self = this;
     var path;
@@ -406,7 +495,9 @@
     var max = size === 'image' ? 716800 : 49152;
     this._photoMemo[path] = this._ready().then(function (sdk) {
       var ref = sdk.F.doc(sdk.db, path);
-      return sdk.F.getDocFromCache(ref).catch(function () { return sdk.F.getDoc(ref); }).then(function (snap) {
+      return sdk.F.getDocFromCache(ref).then(function (snap) {
+        return self._ownerVerified(sdk, ownerPath).then(function (ok) { return ok ? snap : null; });
+      }, function () { return sdk.F.getDoc(ref); }).then(function (snap) {
         if (!snap || !snap.exists()) return null;
         var data = snap.get('data');
         if (typeof data !== 'string' || !data || data.length > max || !B64_RE.test(data)) return null;
@@ -423,6 +514,7 @@
   FirestoreStore.prototype.markRead = function (threadPath) {
     var s = this._session;
     if (!s || s.state !== 'ready' || s.roles.teacher || !s.user || !s.user.emailKey) return Promise.resolve();
+    if (C.readOnlyLogin(s)) return Promise.resolve(); // email 連結登入：規則不准簽回條
     var kind = s.roles.kind;
     if (kind !== 'parent' && kind !== 'staff') return Promise.resolve();
     var path;
@@ -451,4 +543,5 @@
 
   C.FirestoreStore = FirestoreStore;
   C.FirestoreStore.SDK_VERSION = SDK_VERSION;
+  C.FirestoreStore.providerOf = providerOf;
 })(typeof window !== 'undefined' ? window : globalThis);
