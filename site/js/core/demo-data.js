@@ -86,7 +86,11 @@
       seats: [STAFF.seat], kind: 'staff', active: true, label: '座號 ' + STAFF.seat + ' 同仁', updatedAt: at(30, 8)
     });
     put('roster/students', { students: rosterList, updatedAt: at(30, 8) });
-    put('roster/links', { recordsKitUrl: '', classDocsIndexUrl: '', updatedAt: at(30, 8) });
+    // 示範站：「學生觀察與課程紀錄」入口卡接到 teacher-records-kit 的公開示範站（正式站由 publish_site.py --records-kit 設定）
+    put('roster/links', {
+      recordsKitUrl: 'https://elliot200852-lab.github.io/teacher-records-kit-demo/#students',
+      classDocsIndexUrl: '', updatedAt: at(30, 8)
+    });
     put('ops/backup_status', {
       nightly: { lastRunAt: at(0, 2), ok: true },
       weekly: { lastRunAt: at(3, 2), ok: true }
